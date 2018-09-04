@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "superagent": "^3.8.3",
+    "terraformer-arcgis-parser": "^1.1.0"
+  }
+}

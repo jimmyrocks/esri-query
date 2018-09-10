@@ -9,7 +9,7 @@ var whereObj = {
   'where': '1=1',
   'returnGeometry': true,
   'outFields': '*',
-  'outSRS': '4326'
+  'outSR': '4326'
 };
 var returnFields = null; // [];
 var sourceInfo = null;

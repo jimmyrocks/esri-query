@@ -1,7 +1,8 @@
-var crypto = require('crypto');
-var esriQuery = require('./src/esri-query');
-var fs = require('fs');
-var writeGeoJson = require('./src/write-geojson');
+/*eslint-env node*/
+/*eslint-env es6*/
+
+const esriQuery = require('./src/esri-query');
+const fs = require('fs');
 
 var url = process.argv[2];
 // var url = 'https://mapservices.nps.gov/arcgis/rest/services/NPS_Public_POIs/FeatureServer/0';
@@ -23,9 +24,9 @@ var options = {
 
 var outFileId = fs.openSync(outFile, 'a');
 
-esriQuery(url, whereObj, returnFields, sourceInfo, options)
-  .then(function (data) {
-    writeGeoJson(data, outFileId);
+esriQuery(url, whereObj, returnFields, sourceInfo, options, outFileId)
+  .then(function () {
+    fs.closeSync(outFileId);
   })
   .catch(function (e) {
     console.log(e);

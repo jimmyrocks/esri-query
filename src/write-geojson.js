@@ -1,4 +1,7 @@
-var fs = require('fs');
+/*eslint-env es6*/
+/*eslint-env node*/
+
+const fs = require('fs');
 
 var writeGeoJson = function (data, outFileId) {
   var geojsonDoc = '{\n' +
@@ -6,48 +9,27 @@ var writeGeoJson = function (data, outFileId) {
     '"features": [';
   fs.writeSync(outFileId, geojsonDoc);
 
-  var bbox;
-  var row, r;
-  var hashes = {};
-  var hash;
-
-  for (var i = 0; i < data.length; i++) {
-    r = JSON.stringify(data[i]);
-    row = JSON.parse(r);
-    hash = crypto.createHash('md5').update(r).digest('hex');
-    if (!hashes[hash]) {
-      hashes[hash] = true;
-      if (bbox) {
-        bbox[0] = bbox[0] > row.bbox[0] ? row.bbox[0] : bbox[0];
-        bbox[1] = bbox[1] > row.bbox[1] ? row.bbox[1] : bbox[1];
-        bbox[2] = bbox[2] < row.bbox[2] ? row.bbox[2] : bbox[2];
-        bbox[3] = bbox[3] < row.bbox[3] ? row.bbox[3] : bbox[3];
-      } else {
-        bbox = row.bbox;
-      }
-
-      delete row.bbox;
-      if (row.geometry) {
-        delete row.geometry.bbox;
-      }
-
-      row = JSON.stringify(row);
-      /*
-       */
-      geojsonDoc = row + (i < (data.length - 1) ? ',\n' : '');
+  var features = 0;
+  data.db.each('SELECT max("geometry") AS "geometry", max("properties") AS "properties" FROM cache GROUP BY "hash"', function (error, row) {
+  // data.db.each('SELECT * FROM cache', function (error, row) {
+    var record = `{"type": "Feature", "properties": ${row.properties}, "geometry": ${row.geometry}}`;
+    if (!error) {
+      geojsonDoc = (features > 0 ? ',\n' : '') + record;
+      features++;
       fs.writeSync(outFileId, geojsonDoc);
     }
-    // console.log('add row ' + i + ' of ' + data.length);
-    // geojsonDoc.features.push(row);
-    // console.log('row', row);
-  }
-  geojsonDoc = '],\n"bbox": ' + JSON.stringify(bbox) + '}';
-  fs.writeSync(outFileId, geojsonDoc);
-  fs.closeSync(outFileId);
+  },
+  function () {
+    geojsonDoc = '],\n"bbox": ' + JSON.stringify(data.bbox) + '}';
+    fs.writeSync(outFileId, geojsonDoc);
+    fs.closeSync(outFileId);
+    data.db.close();
 
-  // fs.writeFileSync(outFile, geojsonDoc);
-  // console.log(geojsonDoc);
-  console.log('Features written: ' + data.length);
+    // console.log(geojsonDoc);
+    console.log('Features written: ' + features);
+    //TODO maybe return a promise here?
+
+  });
 };
 
 module.exports = writeGeoJson;

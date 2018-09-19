@@ -1,13 +1,19 @@
+/* eslint-env node */
+/* eslint-env es6 */
 /* ArcGIS Source:
  */
 
 var superagent = require('superagent');
 var terraformer = require('terraformer-arcgis-parser');
 var runList = require('./recursive-tasklist');
+var sqlite3 = require('sqlite3');
+var crypto = require('crypto');
+var splitBbox = require('./split-bbox');
+var TaskQueue = require('./task-queue');
 
-var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options) {
+var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, db, options) {
   if (sourceInfo) {
-    return runQuery(sourceUrl, origQueryObj, primaryKeys, sourceInfo, options);
+    return runQuery(sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, db);
   } else {
     return postAsync(sourceUrl, {
       'f': 'json'
@@ -15,7 +21,7 @@ var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, opt
       var fields = source.fields.map(function (field) {
         return field.name;
       });
-      return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options);
+      return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, db);
     }).catch(function (e) {
       return new Promise(function (f, r) {
         r(e);
@@ -24,10 +30,21 @@ var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, opt
   }
 };
 
-var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options) {
+var expandBbox = function (newBox, origBox) {
+  origBox = origBox || [Infinity, Infinity, -Infinity, -Infinity];
+  origBox[0] = origBox[0] > newBox[0] ? newBox[0] : origBox[0];
+  origBox[1] = origBox[1] > newBox[1] ? newBox[1] : origBox[1];
+  origBox[2] = origBox[2] < newBox[2] ? newBox[2] : origBox[2];
+  origBox[3] = origBox[3] < newBox[3] ? newBox[3] : origBox[3];
+  return origBox;
+};
+
+var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, db) {
   // Returns the ESRI Output JSON
   var taskList = [];
   var results = [];
+  var bbox;
+  var queue = new TaskQueue();
 
   var reduceQuery = function (sourceUrl, queryObj, primaryKeys, extent) {
     var newExtents = splitBbox(extent);
@@ -43,37 +60,6 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
         'params': [sourceUrl, queryObj, primaryKeys, newExtent]
       });
     });
-  };
-
-  var splitBbox = function (bbox) {
-    // From: https://github.com/openaddresses/esri-dump/blob/master/lib/geometry.js
-    var halfWidth = (bbox.xmax - bbox.xmin) / 2.0,
-      halfHeight = (bbox.ymax - bbox.ymin) / 2.0;
-    return [{
-      xmin: bbox.xmin,
-      ymin: bbox.ymin,
-      ymax: bbox.ymin + halfHeight,
-      xmax: bbox.xmin + halfWidth
-    },
-    {
-      xmin: bbox.xmin + halfWidth,
-      ymin: bbox.ymin,
-      ymax: bbox.ymin + halfHeight,
-      xmax: bbox.xmax
-    },
-    {
-      xmin: bbox.xmin,
-      ymin: bbox.ymin + halfHeight,
-      xmax: bbox.xmin + halfWidth,
-      ymax: bbox.ymax
-    },
-    {
-      xmin: bbox.xmin + halfWidth,
-      ymin: bbox.ymin + halfHeight,
-      xmax: bbox.xmax,
-      ymax: bbox.ymax
-    }
-    ];
   };
 
   var queryServer = function (sourceUrl, queryObj, primaryKeys, extent) {
@@ -170,37 +156,47 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
   });
 
   return runList(taskList, results).then(function (data) {
-    var records = [];
-    data.forEach(function (result) {
-      var rows = [];
-      var esriOptions = {
-        'sr': (result && result.spatialReference && (result.spatialReference.latestWkid || result.spatialReference.wkid)) || null,
-        'stringifyGeometry': options.geojsonAsString !== undefined ? options.geojsonAsString : true,
-        'asGeoJSON': options.asGeoJSON !== undefined ? options.asGeoJSON : true
-      };
-      if (result && result.features) {
-        rows = result.features.map(function (feature) {
-          feature = feature || {};
-          var geometry = null;
-          try {
-            if (feature.geometry) {
-              geometry = terraformer.parse(esriOptions.asGeoJSON ? feature : feature.geometry, esriOptions);
+    db.parallelize(function () {
+      for (var i = 0; i < data.length; i++) {
+        var result = data[i];
+        var esriOptions = {
+          'sr': (result && result.spatialReference && (result.spatialReference.latestWkid || result.spatialReference.wkid)) || null
+        };
+        if (result && result.features) {
+          result.features.forEach(function (feature) {
+            feature = feature || {};
+            var geometry = null;
+            try {
+              if (feature.geometry) {
+                geometry = terraformer.parse(esriOptions.asGeoJSON ? feature : feature.geometry, esriOptions);
+              }
+            } catch (e) {
+              console.log('error with geometry', e);
             }
-          } catch (e) {
-            console.log('error with geometry', e);
-          }
-          if (esriOptions.asGeoJSON) {
-            return geometry;
-          } else {
-            feature.attributes = feature.attributes || {};
-            feature.attributes.geometry = esriOptions.stringifyGeometry ? JSON.stringify(geometry) : geometry;
-            return feature.attributes;
-          }
-        });
-        records = records.concat(rows);
+
+            // Successfully parsed the geometry!
+            var dbGeometry = JSON.stringify(geometry);
+            var dbProperties = JSON.stringify(feature.attributes);
+            bbox = expandBbox(geometry.bbox(), bbox);
+            var dbHash = crypto.createHash('md5').update(dbGeometry + dbProperties).digest('hex');
+
+            queue.add();
+            db.run('INSERT INTO cache VALUES (?, ?, ?)', [dbGeometry, dbProperties, dbHash], function () {
+              queue.remove();
+            });
+          });
+        }
       }
     });
-    return records;
+    queue.remove();
+    return queue.promise.then(function () {
+      return new Promise(function (res) {
+        res({
+          'db': db,
+          'bbox': bbox
+        });
+      });
+    });
   });
 };
 
@@ -227,12 +223,13 @@ var postAsync = function (url, query) {
 
 module.exports = function (url, whereObj, primaryKeys, sourceInfo, options) {
   /* Valid Options
-   * git@github.com:nationalparkservice/places-sync-sources.git
    * 'sr': output SR
-   * 'stringifyGeometry': Determines if the geometry will be an object or a string
-   *  asGeoJSON': Creates everything in features, if false it will create rows, the geometry will be in the "geometry" column. If stringifyGeometry is true the geometry will be a geojson string, otherwise, it'll be a geojson object
    */
 
   options = options || {};
-  return startQuery(url, whereObj, primaryKeys, sourceInfo, options);
+  var db = new sqlite3.Database(':memory:');
+  db.serialize(function () {
+    db.run('CREATE TABLE cache (geometry TEXT, properties TEXT, hash TEXT)');
+  });
+  return startQuery(url, whereObj, primaryKeys, sourceInfo, db, options);
 };

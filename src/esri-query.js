@@ -3,25 +3,24 @@
 /* ArcGIS Source:
  */
 
-var superagent = require('superagent');
-var terraformer = require('terraformer-arcgis-parser');
-var runList = require('./recursive-tasklist');
-var sqlite3 = require('sqlite3');
-var crypto = require('crypto');
-var splitBbox = require('./split-bbox');
-var TaskQueue = require('./task-queue');
+const terraformer = require('terraformer-arcgis-parser');
+const runList = require('./recursive-tasklist');
+const crypto = require('crypto');
+const splitBbox = require('./split-bbox');
+const fs = require('fs');
+const post = require('./post-async');
 
-var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, db, options) {
+var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, outFileID, options) {
   if (sourceInfo) {
-    return runQuery(sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, db);
+    return runQuery(sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, outFileID);
   } else {
-    return postAsync(sourceUrl, {
+    return post(sourceUrl, {
       'f': 'json'
     }).then(function (source) {
       var fields = source.fields.map(function (field) {
         return field.name;
       });
-      return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, db);
+      return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, outFileID);
     }).catch(function (e) {
       return new Promise(function (f, r) {
         r(e);
@@ -39,12 +38,12 @@ var expandBbox = function (newBox, origBox) {
   return origBox;
 };
 
-var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, db) {
+var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, outFileID) {
   // Returns the ESRI Output JSON
   var taskList = [];
-  var results = [];
   var bbox;
-  var queue = new TaskQueue();
+  var hashList = {};
+  var first = true;
 
   var reduceQuery = function (sourceUrl, queryObj, primaryKeys, extent) {
     var newExtents = splitBbox(extent);
@@ -81,8 +80,8 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
 
     // Get URL
     console.log('getting url', sourceUrl, newQueryObj);
-    return postAsync(sourceUrl, newQueryObj).then(function (data) {
-      return new Promise(function (resolve, reject) {
+    return post(sourceUrl, newQueryObj).then(function (data) {
+      return new Promise(function (resolve) {
         console.log('prequery finished');
         if (data.exceededTransferLimit) {
           console.log('EXCEEDED', extent);
@@ -101,7 +100,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
           //   reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
           //   resolve(null);
           // }
-          return postAsync(sourceUrl, newQueryObj).then(function (data) {
+          return post(sourceUrl, newQueryObj).then(function (data) {
             // We got the data!
             if (data && data.error) {
               console.log('* ERROR getting features **********************************');
@@ -110,9 +109,10 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
               reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
               resolve(null);
             } else {
-              resolve(data); // TODO: transform it?
+              writeOut(data); // TODO: transform it?
+              resolve(null);
             }
-          }).catch(function (e) {
+          }).catch(function () {
             // There was some kind of error, check it, and maybe split bbox?
             reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
             resolve(null);
@@ -148,6 +148,39 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
     });
   };
 
+  var writeOut = function (result) {
+    var esriOptions = {
+      'sr': (result && result.spatialReference && (result.spatialReference.latestWkid || result.spatialReference.wkid)) || null
+    };
+    if (result && result.features) {
+      result.features.forEach(function (feature) {
+        feature = feature || {};
+        var geometry = null;
+        try {
+          if (feature.geometry) {
+            geometry = terraformer.parse(esriOptions.asGeoJSON ? feature : feature.geometry, esriOptions);
+          }
+        } catch (e) {
+          console.log('error with geometry', e);
+        }
+
+        // Successfully parsed the geometry!
+        var dbGeometry = JSON.stringify(geometry);
+        var dbProperties = JSON.stringify(feature.attributes);
+        bbox = expandBbox(geometry.bbox(), bbox);
+        var geojsonDoc = `{"type": "Feature", "properties": ${dbProperties}, "geometry": ${dbGeometry}}`;
+        var dbHash = crypto.createHash('md5').update(geojsonDoc).digest('hex');
+
+        if (!hashList[dbHash]) {
+          hashList[dbHash] = true;
+          // add a comma before it unless it's the first one
+          fs.writeSync(outFileID, (first ? '' : ', ') + geojsonDoc);
+          first = false;
+        }
+      });
+    }
+  };
+
   taskList.push({
     'name': 'First Query',
     'description': 'Starts off the query',
@@ -155,81 +188,20 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
     'params': [sourceUrl, origQueryObj, primaryKeys, sourceInfo.extent]
   });
 
-  return runList(taskList, results).then(function (data) {
-    db.parallelize(function () {
-      for (var i = 0; i < data.length; i++) {
-        var result = data[i];
-        var esriOptions = {
-          'sr': (result && result.spatialReference && (result.spatialReference.latestWkid || result.spatialReference.wkid)) || null
-        };
-        if (result && result.features) {
-          result.features.forEach(function (feature) {
-            feature = feature || {};
-            var geometry = null;
-            try {
-              if (feature.geometry) {
-                geometry = terraformer.parse(esriOptions.asGeoJSON ? feature : feature.geometry, esriOptions);
-              }
-            } catch (e) {
-              console.log('error with geometry', e);
-            }
-
-            // Successfully parsed the geometry!
-            var dbGeometry = JSON.stringify(geometry);
-            var dbProperties = JSON.stringify(feature.attributes);
-            bbox = expandBbox(geometry.bbox(), bbox);
-            var dbHash = crypto.createHash('md5').update(dbGeometry + dbProperties).digest('hex');
-
-            queue.add();
-            db.run('INSERT INTO cache VALUES (?, ?, ?)', [dbGeometry, dbProperties, dbHash], function () {
-              queue.remove();
-            });
-          });
-        }
-      }
-    });
-    queue.remove();
-    return queue.promise.then(function () {
-      return new Promise(function (res) {
-        res({
-          'db': db,
-          'bbox': bbox
-        });
-      });
-    });
+  return runList(taskList).then(function () {
+    var geojsonDoc = '],\n"bbox": ' + JSON.stringify(bbox) + '}';
+    fs.writeSync(outFileID, geojsonDoc);
   });
 };
 
-var postAsync = function (url, query) {
-  return new Promise(function (resolve, reject) {
-    superagent.post(url)
-      .set('Accept', 'application/json')
-      .send(superagent.serialize['application/x-www-form-urlencoded'](query))
-      .end(function (err, res) {
-        var body;
-        try {
-          body = JSON.parse(res.text);
-        } catch (e) {
-          err = err || e;
-        }
-        if (err) {
-          reject(err);
-        } else {
-          resolve(body);
-        }
-      });
-  });
-};
 
-module.exports = function (url, whereObj, primaryKeys, sourceInfo, options) {
+module.exports = function (url, whereObj, primaryKeys, sourceInfo, options, outFileID) {
   /* Valid Options
    * 'sr': output SR
    */
 
   options = options || {};
-  var db = new sqlite3.Database(':memory:');
-  db.serialize(function () {
-    db.run('CREATE TABLE cache (geometry TEXT, properties TEXT, hash TEXT)');
-  });
-  return startQuery(url, whereObj, primaryKeys, sourceInfo, db, options);
+  var geojsonHeader = '{"type": "FeatureCollection", "features": [';
+  fs.writeSync(outFileID, geojsonHeader);
+  return startQuery(url, whereObj, primaryKeys, sourceInfo, outFileID, options);
 };

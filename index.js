@@ -1,7 +1,7 @@
 var crypto = require('crypto');
 var esriQuery = require('./src/esri-query');
 var fs = require('fs');
-var writeGeoJson = require('./src/writeGeoJson');
+var writeGeoJson = require('./src/write-geojson');
 
 var url = process.argv[2];
 // var url = 'https://mapservices.nps.gov/arcgis/rest/services/NPS_Public_POIs/FeatureServer/0';

@@ -7,7 +7,6 @@ const terraformer = require('terraformer-arcgis-parser');
 const runList = require('./recursive-tasklist');
 const crypto = require('crypto');
 const splitBbox = require('./split-bbox');
-const fs = require('fs');
 const post = require('./post-async');
 
 var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, outFileID, options) {

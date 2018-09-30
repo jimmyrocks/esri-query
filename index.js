@@ -1,12 +1,9 @@
-/*eslint-env node*/
-/*eslint-env es6*/
+/* eslint-env node, es6 */
 
 const esriQuery = require('./src/esri-query');
-const fs = require('fs');
+const GeoJsonWriter = require('./src/fileWriter');
 
 var url = process.argv[2];
-// var url = 'https://mapservices.nps.gov/arcgis/rest/services/NPS_Public_POIs/FeatureServer/0';
-// var url = 'http://maps.pasda.psu.edu/arcgis/rest/services/pasda/CityPhillyWatersheds/MapServer/8';
 var whereObj = {
   'where': '1=1',
   'returnGeometry': true,
@@ -16,19 +13,17 @@ var whereObj = {
 var returnFields = null; // [];
 var sourceInfo = null;
 var outFile = process.argv[3];
-// var outFile = './pois.json';
-// var outFile = './test.json';
 var options = {
   'asGeoJSON': true
 };
 
-var outFileId = fs.openSync(outFile, 'a');
+var writer = new GeoJsonWriter(outFile);
 
-esriQuery(url, whereObj, returnFields, sourceInfo, options, outFileId)
+esriQuery(url, whereObj, returnFields, sourceInfo, options, writer)
   .then(function () {
-    fs.closeSync(outFileId);
+    writer.close();
   })
   .catch(function (e) {
-    console.log(e);
+    console.error(e);
     throw new Error(e);
   });

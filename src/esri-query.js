@@ -9,9 +9,9 @@ const crypto = require('crypto');
 const splitBbox = require('./split-bbox');
 const post = require('./post-async');
 
-var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, outFileID, options) {
+var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, writer, options) {
   if (sourceInfo) {
-    return runQuery(sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, outFileID);
+    return runQuery(sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, writer);
   } else {
     return post(sourceUrl, {
       'f': 'json'
@@ -19,7 +19,7 @@ var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, out
       var fields = source.fields.map(function (field) {
         return field.name;
       });
-      return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, outFileID);
+      return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, writer);
     }).catch(function (e) {
       return new Promise(function (f, r) {
         r(e);
@@ -37,7 +37,7 @@ var expandBbox = function (newBox, origBox) {
   return origBox;
 };
 
-var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, outFileID) {
+var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, options, writer) {
   // Returns the ESRI Output JSON
   var taskList = [];
   var bbox;
@@ -46,10 +46,10 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
 
   var reduceQuery = function (sourceUrl, queryObj, primaryKeys, extent) {
     var newExtents = splitBbox(extent);
-    // console.log('-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-');
-    // console.log('Splitting: ', extent);
-    // console.log('To: ', newExtents);
-    // console.log('-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-');
+    // console.error('-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-');
+    // console.error('Splitting: ', extent);
+    // console.error('To: ', newExtents);
+    // console.error('-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-');
     newExtents.forEach(function (newExtent) {
       taskList.push({
         'name': 'Query ' + JSON.stringify(newExtent),
@@ -78,20 +78,20 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
     sourceUrl = sourceUrl + (sourceUrl.substr(sourceUrl.length - 1) === '/' ? '' : '/') + 'query';
 
     // Get URL
-    console.log('getting url', sourceUrl, newQueryObj);
+    console.error('getting url', sourceUrl, newQueryObj);
     return post(sourceUrl, newQueryObj).then(function (data) {
       return new Promise(function (resolve) {
-        console.log('prequery finished');
+        console.error('prequery finished');
         if (data.exceededTransferLimit) {
-          console.log('EXCEEDED', extent);
+          console.error('EXCEEDED', extent);
           reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
           resolve(null);
         } else if (data.features && data.features.length === 0) {
-          console.log('NO FEATURES LEFT');
+          console.error('NO FEATURES LEFT');
           // No features in this query
           resolve(null);
         } else if (data.features) {
-          console.log('Found Features', data && data.features && data.features.length);
+          console.error('Found Features', data && data.features && data.features.length);
           newQueryObj.outFields = origQueryObj.outFields || '*';
           newQueryObj.returnGeometry = origQueryObj.returnGeometry;
           // TODO: Add a parameter to set a max features that is less than the limit
@@ -102,9 +102,9 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
           return post(sourceUrl, newQueryObj).then(function (data) {
             // We got the data!
             if (data && data.error) {
-              console.log('* ERROR getting features **********************************');
-              console.log(data.error);
-              console.log('* ERROR ************************************');
+              console.error('* ERROR getting features **********************************');
+              console.error(data.error);
+              console.error('* ERROR ************************************');
               reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
               resolve(null);
             } else {
@@ -117,9 +117,9 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
             resolve(null);
           });
         } else if (data.error) {
-          console.log('* ERROR with prequery  **********************************');
-          console.log(data.error);
-          console.log('* ERROR ************************************');
+          console.error('* ERROR with prequery  **********************************');
+          console.error(data.error);
+          console.error('* ERROR ************************************');
           newQueryObj.outFields = origQueryObj.outFields || '*';
           newQueryObj.returnGeometry = origQueryObj.returnGeometry;
 
@@ -127,7 +127,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
           resolve(null);
         } else {
           // Not much else we can do? error? null?
-          console.log('???????????????????????????');
+          console.error('???????????????????????????');
           process.exit();
           resolve(null);
         }
@@ -135,8 +135,8 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
     }).catch(function (e) {
       return new Promise(function (resolve, reject) {
         // TODO, actually fail on 404s
-        console.log('Error with request');
-        console.log(e);
+        console.error('Error with request');
+        console.error(e);
         if (e.code === 'ECONNRESET') {
           reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
           resolve(null);
@@ -160,7 +160,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
             geometry = terraformer.parse(esriOptions.asGeoJSON ? feature : feature.geometry, esriOptions);
           }
         } catch (e) {
-          console.log('error with geometry', e);
+          console.error('error with geometry', e);
         }
 
         // Successfully parsed the geometry!
@@ -173,7 +173,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
         if (!hashList[dbHash]) {
           hashList[dbHash] = true;
           // add a comma before it unless it's the first one
-          fs.writeSync(outFileID, (first ? '' : ', ') + geojsonDoc);
+          writer.writeLine(geojsonDoc);
           first = false;
         }
       });
@@ -188,19 +188,17 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
   });
 
   return runList(taskList).then(function () {
-    var geojsonDoc = '],\n"bbox": ' + JSON.stringify(bbox) + '}';
-    fs.writeSync(outFileID, geojsonDoc);
+    writer.writeFooter(bbox);
   });
 };
 
 
-module.exports = function (url, whereObj, primaryKeys, sourceInfo, options, outFileID) {
+module.exports = function (url, whereObj, primaryKeys, sourceInfo, options, writer) {
   /* Valid Options
    * 'sr': output SR
    */
 
   options = options || {};
-  var geojsonHeader = '{"type": "FeatureCollection", "features": [';
-  fs.writeSync(outFileID, geojsonHeader);
-  return startQuery(url, whereObj, primaryKeys, sourceInfo, outFileID, options);
+  writer.writeHeader();
+  return startQuery(url, whereObj, primaryKeys, sourceInfo, writer, options);
 };

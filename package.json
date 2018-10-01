@@ -1,6 +1,13 @@
 {
   "name": "esri-query",
+  "main": "app.js",
+  "bin": {
+    "esri-stream": "stream.js"
+  },
   "dependencies": {
+    "command-line-args": "^5.0.2",
+    "command-line-usage": "^5.0.5",
+    "geobuf": "^3.0.1",
     "superagent": "^4.0.0-beta.5",
     "terraformer-arcgis-parser": "^1.1.0"
   }

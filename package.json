@@ -1,5 +1,6 @@
 {
   "name": "esri-query",
+  "version": "0.0.1",
   "main": "app.js",
   "bin": {
     "esri-stream": "stream.js"

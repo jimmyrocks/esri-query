@@ -164,8 +164,8 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
         }
 
         // Successfully parsed the geometry!
-        var dbGeometry = JSON.stringify(geometry);
-        var dbProperties = JSON.stringify(feature.attributes);
+        var dbGeometry = JSON.stringify(geometry, null, options.pretty ? 2 : 0);
+        var dbProperties = JSON.stringify(feature.attributes, null, options.pretty ? 2 : 0);
         bbox = expandBbox(geometry.bbox(), bbox);
         var geojsonDoc = `{"type": "Feature", "properties": ${dbProperties}, "geometry": ${dbGeometry}}`;
         var dbHash = crypto.createHash('md5').update(geojsonDoc).digest('hex');

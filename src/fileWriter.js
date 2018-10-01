@@ -8,6 +8,12 @@ var GeoJsonWriterSync = function (path, options) {
   var header = '{"type": "FeatureCollection", "features": [';
   var footer = ']}';
   var bboxFooter = '], "bbox":{bbox}}';
+  var delimiter = ',';
+
+  if (options.lineDelimited) {
+    header = footer = bboxFooter = '';
+    delimiter = '\n';
+  };
 
   var open, write, close, fileId, first, closed, hasHeader, hasFooter, writeStream;
 
@@ -62,7 +68,7 @@ var GeoJsonWriterSync = function (path, options) {
     writeHeader: function () {
       if (first && !hasHeader && !closed) {
         hasHeader = true;
-        write(header);
+        return write(header);
       } else {
         throw new Error('Header already added');
       }
@@ -79,7 +85,7 @@ var GeoJsonWriterSync = function (path, options) {
     writeLine: function (line) {
       var returnValue;
       if (hasHeader && !hasFooter && !closed) {
-        returnValue = write((first ? '' : ', ') + line);
+        returnValue = write((first ? '' : delimiter) + line);
         first = false;
         return returnValue;
       } else {

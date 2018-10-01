@@ -1,12 +1,21 @@
 /* eslint-env node, es6 */
 const fs = require('fs');
+const {
+  Readable
+} = require('stream');
 
-var GeoJsonWriterSync = function (path) {
+var GeoJsonWriterSync = function (path, options) {
   var header = '{"type": "FeatureCollection", "features": [';
   var footer = ']}';
   var bboxFooter = '], "bbox":{bbox}}';
 
-  var open, write, close, fileId, first, closed, hasHeader, hasFooter;
+  var open, write, close, fileId, first, closed, hasHeader, hasFooter, writeStream;
+
+  if (options.stream) {
+    writeStream = new Readable();
+    writeStream._read = function () {};
+  }
+
   if (path) {
     // write to file
     open = function (outFile) {
@@ -33,10 +42,17 @@ var GeoJsonWriterSync = function (path) {
       first = true;
     };
     close = function () {
+      if (writeStream) {
+        writeStream.push(null);
+      }
       closed = true;
     };
     write = function (line) {
-      process.stdout.write(line);
+      if (writeStream) {
+        writeStream.push(line);
+      } else {
+        process.stdout.write(line);
+      }
     };
   }
 
@@ -52,7 +68,7 @@ var GeoJsonWriterSync = function (path) {
       }
     },
     writeFooter: function (bbox) {
-      var thisFooter = bbox ? bboxFooter.replace('{bbox}', JSON.stringify(bbox)): footer;
+      var thisFooter = bbox ? bboxFooter.replace('{bbox}', JSON.stringify(bbox)) : footer;
       if (hasHeader && !hasFooter && !closed) {
         hasFooter = true;
         return write(thisFooter);
@@ -67,48 +83,18 @@ var GeoJsonWriterSync = function (path) {
         first = false;
         return returnValue;
       } else {
-        throw new Error('Line cannot be written: hasHeader:'+hasHeader+' hasFooter:'+hasFooter+' closed:'+closed);
+        throw new Error('Line cannot be written: hasHeader:' + hasHeader + ' hasFooter:' + hasFooter + ' closed:' + closed);
       }
     },
-    close: function() {
+    close: function () {
       if (!closed) {
         return close();
       } else {
         throw new Error('Stream already closed');
       }
-    }
+    },
+    stream: writeStream || fileId
   };
 };
-
-// var fileWriter = function (path, options) {
-//   var cache = [];
-//   var fd;
-//
-//   return {
-//     'create': function (newOptions) {
-//       options = newOptions || options || {};
-//       return new Promise(function (resolve) {
-//         fs.open(path, options.flags || 'a', (err, newFd) => {
-//           if (err) throw err;
-//           fd = newFd;
-//           resolve(fd);
-//         });
-//       });
-//     },
-//     'append': function (data) {
-//       return cache.push(data);
-//     },
-//     'save': function () {
-//       return fs.appendFile(fd, cache.join('\n'), (err) => {
-//         if (err) throw err;
-//       });
-//     },
-//     'close': function () {
-//       return fs.close(fd, (err) => {
-//         if (err) throw err;
-//       });
-//     }
-//   };
-// };
 
 module.exports = GeoJsonWriterSync;

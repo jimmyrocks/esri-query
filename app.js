@@ -1,7 +1,7 @@
 /* eslint-env node, es6 */
 
 const esriQuery = require('./src/esri-query');
-const GeoJsonWriter = require('./src/fileWriter');
+const GeoJsonWriter = require('./src/geojsonWriter');
 
 var streamRest = function (url, query, writer) {
   var whereObj = {
@@ -15,7 +15,6 @@ var streamRest = function (url, query, writer) {
   var options = {
     'asGeoJSON': true
   };
-  console.log(writer.stream);
 
   return esriQuery(url, whereObj, returnFields, sourceInfo, options, writer)
     .then(function () {
@@ -29,9 +28,11 @@ var streamRest = function (url, query, writer) {
 };
 
 module.exports = function () {
-  var writer = new GeoJsonWriter(null, {
+  var writer = new GeoJsonWriter({
+    'type': 'stdout',
     'stream': true
   });
+
 
   return {
     'stream': writer.stream,

@@ -43,6 +43,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
   var bbox;
   var hashList = {};
   var first = true;
+  var errorCount = 0;
 
   var reduceQuery = function (sourceUrl, queryObj, primaryKeys, extent) {
     var newExtents = splitBbox(extent);
@@ -89,6 +90,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
         } else if (data.features && data.features.length === 0) {
           console.error('NO FEATURES LEFT');
           // No features in this query
+          errorCount--;
           resolve(null);
         } else if (data.features) {
           console.error('Found Features', data && data.features && data.features.length);
@@ -108,6 +110,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
               reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
               resolve(null);
             } else {
+              errorCount--;
               writeOut(data); // TODO: transform it?
               resolve(null);
             }
@@ -136,10 +139,23 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
       return new Promise(function (resolve, reject) {
         // TODO, actually fail on 404s
         console.error('Error with request');
-        console.error(e);
+        console.error(e.status, e.code);
         if (e.code === 'ECONNRESET') {
           reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
           resolve(null);
+        } else if (e.status = 502) {
+          // If we're getting a 502, wait
+          errorCount = errorCount <= 0 ? 0 : errorCount;
+          errorCount++;
+          if (errorCount > 10) {
+            console.error('Too many errors');
+            console.error(e.status, e.code);
+            reject(e);
+          }
+          setTimeout(function() {
+            reduceQuery(sourceUrl, newQueryObj, primaryKeys, extent);
+            resolve(null);
+          }, 1500 * errorCount);
         } else {
           reject(e);
         }

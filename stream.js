@@ -1,7 +1,7 @@
 /* eslint-env node, es6 */
 
 const esriQuery = require('./src/esri-query');
-const GeoJsonWriter = require('./src/fileWriter');
+const GeoJsonWriter = require('./src/geojsonWriter');
 
 // CLI
 const commandLineArgs = require('command-line-args');
@@ -30,17 +30,17 @@ const optionDefinitions = [{
   defaultValue: '1=1'
 },
 {
+  name: 'type',
+  alias: 't',
+  type: String,
+  description: '[file, stdout]',
+  defaultValue: 'stdout'
+},
+{
   name: 'output',
   alias: 'o',
   type: String,
-  description: 'The file to write to'
-},
-{
-  name: 'stdout',
-  alias: 's',
-  type: Boolean,
-  description: 'Write to stdout (overrides dest)',
-  defaultValue: false
+  description: 'The file to write out (if set, type becomes file)'
 },
 {
   name: 'line-delimited',
@@ -54,6 +54,13 @@ const optionDefinitions = [{
   alias: 'p',
   type: Boolean,
   description: 'Pretty Print JSON (line-delimited will override this)',
+  defaultValue: false
+},
+{
+  name: 'include-bbox',
+  alias: 'b',
+  type: Boolean,
+  description: 'Add a bbox for each entry',
   defaultValue: false
 }
 
@@ -89,15 +96,12 @@ var queryOptions = {
   'pretty':  options['pretty'] && !options['line-delimited'] // Can't have a pretty line delimited file
 };
 
-var writer = new GeoJsonWriter(options.stdout ? undefined : options.output, {
-  lineDelimited: options['line-delimited']
-});
+var writer = new GeoJsonWriter(options);
 
 esriQuery(options.url, whereObj, returnFields, sourceInfo, queryOptions, writer)
   .then(function () {
     writer.close();
   })
   .catch(function (e) {
-    console.error(e);
-    throw new Error(e);
+    console.error('error:', e);
   });

@@ -164,15 +164,18 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
         }
 
         // Successfully parsed the geometry!
-        var dbGeometry = JSON.stringify(geometry, null, options.pretty ? 2 : 0);
-        var dbProperties = JSON.stringify(feature.attributes, null, options.pretty ? 2 : 0);
         bbox = expandBbox(geometry.bbox(), bbox);
+        var subGeometry = geometry.toJSON();
+        if (!options['include-bbox']) {
+          delete subGeometry.bbox;
+        }
+        var dbGeometry = JSON.stringify(subGeometry, null, options.pretty ? 2 : 0);
+        var dbProperties = JSON.stringify(feature.attributes, null, options.pretty ? 2 : 0);
         var geojsonDoc = `{"type": "Feature", "properties": ${dbProperties}, "geometry": ${dbGeometry}}`;
         var dbHash = crypto.createHash('md5').update(geojsonDoc).digest('hex');
 
         if (!hashList[dbHash]) {
           hashList[dbHash] = true;
-          // add a comma before it unless it's the first one
           writer.writeLine(geojsonDoc);
           first = false;
         }

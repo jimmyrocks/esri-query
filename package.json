@@ -9,7 +9,10 @@
     "command-line-args": "^5.0.2",
     "command-line-usage": "^5.0.5",
     "geobuf": "^3.0.1",
+    "pg": "^7.4.3",
+    "sqlite3": "^4.0.2",
     "superagent": "^4.0.0-beta.5",
-    "terraformer-arcgis-parser": "^1.1.0"
+    "terraformer-arcgis-parser": "^1.1.0",
+    "wkx": "^0.4.5"
   }
 }

@@ -4,10 +4,10 @@
  */
 
 const terraformer = require('terraformer-arcgis-parser');
-const runList = require('./recursive-tasklist');
+const runList = require('../helpers/recursive-tasklist');
 const crypto = require('crypto');
-const splitBbox = require('./split-bbox');
-const post = require('./post-async');
+const splitBbox = require('../helpers/esri-split-bbox');
+const post = require('../helpers/post-async');
 
 var startQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, writer, options) {
   if (sourceInfo) {
@@ -180,6 +180,7 @@ var runQuery = function (sourceUrl, origQueryObj, primaryKeys, sourceInfo, optio
           first = false;
         }
       });
+      writer.save();
     }
   };
 

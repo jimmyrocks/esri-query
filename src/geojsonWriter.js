@@ -10,6 +10,10 @@ var GeoJsonWriter = function (options) {
   var bboxFooter = '], "bbox":{bbox}}';
   var delimiter = ',';
 
+  // Set default options to stdout
+  options = options || {};
+  options.type = options.type || 'stdout';
+
   if (options.lineDelimited) {
     header = footer = bboxFooter = '';
     delimiter = '\n';
@@ -17,12 +21,11 @@ var GeoJsonWriter = function (options) {
 
   var writer = new Writers[options.type](options);
   writer.open();
-  
+
   var hasHeader = false;
   var hasFooter = false;
   var closed = false;
   var first = true;
-  
 
   return {
     writeHeader: function () {

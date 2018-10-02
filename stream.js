@@ -1,6 +1,6 @@
 /* eslint-env node, es6 */
 
-const esriQuery = require('./src/esri-query');
+const esriQuery = require('./src/readers/esriRest');
 const GeoJsonWriter = require('./src/geojsonWriter');
 
 // CLI
@@ -62,7 +62,15 @@ const optionDefinitions = [{
   type: Boolean,
   description: 'Add a bbox for each entry',
   defaultValue: false
+},
+{
+  name: 'connection-string',
+  alias: 'c',
+  type: String,
+  description: 'The database connection string (ex. postgresql://dbuser:secretpassword@database.server.com:3211/mydb)',
+  defaultValue: null
 }
+
 
 ];
 
@@ -101,6 +109,9 @@ var writer = new GeoJsonWriter(options);
 esriQuery(options.url, whereObj, returnFields, sourceInfo, queryOptions, writer)
   .then(function () {
     writer.close();
+    writer.promise.then(function(){
+      //Done()
+    });
   })
   .catch(function (e) {
     console.error('error:', e);

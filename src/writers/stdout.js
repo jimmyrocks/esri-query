@@ -5,13 +5,12 @@ const {
 
 var stdout = function (options) {
   var writeStream;
+  if (options.stream) {
+    writeStream = new Readable();
+    writeStream._read = function () {};
+  }
 
-  var open = function () {
-    if (options.stream) {
-      writeStream = new Readable();
-      writeStream._read = function () {};
-    }
-  };
+  var open = function () {};
   var save = function () {};
   var close = function () {
     if (writeStream) {
@@ -29,7 +28,8 @@ var stdout = function (options) {
     'open': open,
     'close': close,
     'write': write,
-    'save': save
+    'save': save,
+    'stream': writeStream
   };
 };
 

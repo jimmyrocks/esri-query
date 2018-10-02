@@ -1,6 +1,8 @@
 /* eslint-env node, es6 */
 const Writers = {
   file: require('./writers/file.js'),
+  postgres: require('./writers/postgres.js'),
+  sqlite: require('./writers/sqlite.js'),
   stdout: require('./writers/stdout.js')
 };
 
@@ -14,7 +16,7 @@ var GeoJsonWriter = function (options) {
   options = options || {};
   options.type = options.type || 'stdout';
 
-  if (options.lineDelimited) {
+  if (options['line-delimited'] || options.type === 'sqlite' || options.type === 'postgres') {
     header = footer = bboxFooter = '';
     delimiter = '\n';
   }
@@ -63,7 +65,19 @@ var GeoJsonWriter = function (options) {
         throw new Error(options.type + ' already closed');
       }
     },
-    stream: writer.stream
+    save: function () {
+      if (hasHeader && !hasFooter && !closed) {
+        return writer.save();
+      } else {
+        throw new Error('Cannot save');
+      }
+    },
+    stream: writer.stream,
+    promise: writer.promise || {
+      'then': function (callback) {
+        return callback();
+      }
+    }
   };
 };
 

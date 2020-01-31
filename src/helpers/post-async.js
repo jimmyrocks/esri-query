@@ -12,6 +12,7 @@ var postAsync = function (url, query) {
         try {
           body = JSON.parse(res.text);
         } catch (e) {
+          e.text = res.text;
           err = err || e;
         }
         if (err) {

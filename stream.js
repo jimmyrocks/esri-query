@@ -69,6 +69,20 @@ const optionDefinitions = [{
   type: String,
   description: 'The database connection string (ex. postgresql://dbuser:secretpassword@database.server.com:3211/mydb)',
   defaultValue: null
+},
+{
+  name: 'method',
+  alias: 'm',
+  type: String,
+  description: 'Pagination method: Either geographic or default',
+  defaultValue: 'default'
+},
+{
+  name: 'feature-count',
+  alias: 'f',
+  type: Number,
+  description: 'Features per query (Default is server default)',
+  defaultValue: null
 }
 
 
@@ -101,6 +115,8 @@ var sourceInfo = null;
 
 var queryOptions = {
   'asGeoJSON': true,
+  'method': options['method'],
+  'feature-count': options['feature-count'],
   'pretty':  options['pretty'] && !options['line-delimited'] // Can't have a pretty line delimited file
 };
 

@@ -283,20 +283,21 @@ var runQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, option
         }
 
         // Successfully parsed the geometry!
-        bbox = expandBbox(geometry.bbox(), bbox);
-        var subGeometry = geometry.toJSON();
-        if (!options['include-bbox']) {
-          delete subGeometry.bbox;
-        }
-        var dbGeometry = JSON.stringify(subGeometry, null, options.pretty ? 2 : 0);
-        var dbProperties = JSON.stringify(feature.attributes, null, options.pretty ? 2 : 0);
-        var geojsonDoc = `{"type": "Feature", "properties": ${dbProperties}, "geometry": ${dbGeometry}}`;
-        var dbHash = crypto.createHash('md5').update(geojsonDoc).digest('hex');
+        if (geometry) {
+          bbox = expandBbox(geometry.bbox(), bbox);
+          var subGeometry = geometry.toJSON();
+          if (!options['include-bbox']) {
+            delete subGeometry.bbox;
+          }
+          var dbGeometry = JSON.stringify(subGeometry, null, options.pretty ? 2 : 0);
+          var dbProperties = JSON.stringify(feature.attributes, null, options.pretty ? 2 : 0);
+          var geojsonDoc = `{"type": "Feature", "properties": ${dbProperties}, "geometry": ${dbGeometry}}`;
+          var dbHash = crypto.createHash('md5').update(geojsonDoc).digest('hex');
 
-        if (!hashList[dbHash]) {
-          hashList[dbHash] = true;
-          writer.writeLine(geojsonDoc);
-          first = false;
+          if (!hashList[dbHash]) {
+            hashList[dbHash] = true;
+            writer.writeLine(geojsonDoc);
+          }
         }
       });
       writer.save();

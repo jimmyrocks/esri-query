@@ -3,7 +3,7 @@
 /* ArcGIS Source:
  */
 
-const terraformer = require('terraformer-arcgis-parser');
+const terraformer = require('@terraformer/arcgis').arcgisToGeoJSON;
 const runList = require('../helpers/recursive-tasklist');
 const crypto = require('crypto');
 const splitBbox = require('../helpers/esri-split-bbox');
@@ -18,6 +18,7 @@ var startQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, writ
     }).then(function(source) {
       var fields = source.fields.filter(field => field.type !== 'esriFieldTypeGeometry').map(field => field.name);
       options['feature-count'] = options['feature-count'] || source.maxRecordCount;
+      origQueryObj['f'] = origQueryObj['f'] || ((source.supportedQueryFormats.match('PBF') && options.pbf) ? 'pbf' : 'json');
       return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, writer);
     }).catch(function(e) {
       return new Promise(function(f, r) {
@@ -68,6 +69,7 @@ var runQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, option
       });
     } else {
       // Cut the request in half
+      console.error('splitting');
       newQuerys.push({
         'min': queryObj.resultOffset + options['feature-count'],
         'max': queryObj.resultOffset + options['feature-count'] + Math.floor(options['feature-count'] / 2)
@@ -88,13 +90,11 @@ var runQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, option
     });
   };
 
-
   var queryServer = function(sourceUrl, queryObj, primaryKeys, extent) {
     var newQueryObj = JSON.parse(JSON.stringify(queryObj));
     // Make it a query URL if it isn' already one
     sourceUrl = sourceUrl.replace(/query\??$/ig, '');
     sourceUrl = sourceUrl + (sourceUrl.substr(sourceUrl.length - 1) === '/' ? '' : '/') + 'query';
-    newQueryObj.f = 'json';
 
     // Get URL
     console.error('getting url', sourceUrl, newQueryObj, options);
@@ -116,16 +116,16 @@ var runQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, option
 
     return post(sourceUrl, newQueryObj).then(function(data) {
       return new Promise(function(resolve) {
-        // console.error('Got url!');
+         console.error('Got url!');
         //
         if (data.features && data.features.length === 0) {
           console.error('NO FEATURES LEFT');
           // No features in this query
           resolve(null);
         } else if (data.features) {
-          // console.error('features!', data.features.length);
+           console.error('features!', data.features.length);
           // Get next
-          nextQuery(sourceUrl, newQueryObj, primaryKeys, true);
+          nextQuery(sourceUrl, newQueryObj, primaryKeys, false);
           errorCount--;
           writeOut(data); // TODO: transform it?
           resolve(null);
@@ -267,16 +267,13 @@ var runQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, option
   };
 
   var writeOut = function(result) {
-    var esriOptions = {
-      'sr': (result && result.spatialReference && (result.spatialReference.latestWkid || result.spatialReference.wkid)) || null
-    };
     if (result && result.features) {
       result.features.forEach(function(feature) {
         feature = feature || {};
         var geometry = null;
         try {
           if (feature.geometry) {
-            geometry = terraformer.parse(esriOptions.asGeoJSON ? feature : feature.geometry, esriOptions);
+            geometry = terraformer(feature.geometry);
           }
         } catch (e) {
           console.error('error with geometry', e);
@@ -284,12 +281,13 @@ var runQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, option
 
         // Successfully parsed the geometry!
         if (geometry) {
-          bbox = expandBbox(geometry.bbox(), bbox);
-          var subGeometry = geometry.toJSON();
-          if (!options['include-bbox']) {
-            delete subGeometry.bbox;
-          }
-          var dbGeometry = JSON.stringify(subGeometry, null, options.pretty ? 2 : 0);
+          //bbox = expandBbox(geometry.bbox(), bbox);
+          //console.log(geometry);
+          //var subGeometry = geometry.toJSON();
+          //if (!options['include-bbox']) {
+          //  delete subGeometry.bbox;
+          //}
+          var dbGeometry = JSON.stringify(geometry, null, options.pretty ? 2 : 0);
           var dbProperties = JSON.stringify(feature.attributes, null, options.pretty ? 2 : 0);
           var geojsonDoc = `{"type": "Feature", "properties": ${dbProperties}, "geometry": ${dbGeometry}}`;
           var dbHash = crypto.createHash('md5').update(geojsonDoc).digest('hex');

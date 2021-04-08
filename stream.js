@@ -51,7 +51,7 @@ const optionDefinitions = [{
 },
 {
   name: 'pretty',
-  alias: 'p',
+  alias: 'y',
   type: Boolean,
   description: 'Pretty Print JSON (line-delimited will override this)',
   defaultValue: false
@@ -83,9 +83,14 @@ const optionDefinitions = [{
   type: Number,
   description: 'Features per query (Default is server default)',
   defaultValue: null
+},
+{
+  name: 'pbf',
+  alias: 'p',
+  type: Boolean,
+  description: 'Experiemental - Use protobuf to download data',
+  defaultValue: false
 }
-
-
 ];
 
 const options = commandLineArgs(optionDefinitions);
@@ -110,6 +115,7 @@ var whereObj = {
 };
 
 // Not sure if we're going to do anything with these
+
 var returnFields = null; // [];
 var sourceInfo = null;
 
@@ -117,6 +123,7 @@ var queryOptions = {
   'asGeoJSON': true,
   'method': options['method'],
   'feature-count': options['feature-count'],
+  'pbf': options['pbf'], 
   'pretty':  options['pretty'] && !options['line-delimited'] // Can't have a pretty line delimited file
 };
 

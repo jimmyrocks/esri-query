@@ -16,7 +16,7 @@ var startQuery = function(sourceUrl, origQueryObj, primaryKeys, sourceInfo, writ
     return post(sourceUrl, {
       'f': 'json'
     }).then(function(source) {
-      var fields = source.fields.filter(field => field.type !== 'esriFieldTypeGeometry').map(field => field.name);
+      var fields = source.fields.filter(field => field.type !== 'esriFieldTypeGeometry' && field.name.indexOf('()') === -1).map(field => field.name);
       options['feature-count'] = options['feature-count'] || source.maxRecordCount;
       origQueryObj['f'] = origQueryObj['f'] || ((source.supportedQueryFormats.match('PBF') && options.pbf) ? 'pbf' : 'json');
       return runQuery(sourceUrl, origQueryObj, primaryKeys || fields, source, options, writer);

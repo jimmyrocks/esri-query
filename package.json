@@ -4,6 +4,15 @@
   "exports": "./dist/index.js",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "geopackage",
+    "esri",
+    "featureservice",
+    "mapservice",
+    "rest",
+    "geojson",
+    "geojsonsync"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jimmyrocks/esri-query.git"

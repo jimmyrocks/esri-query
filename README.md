@@ -17,6 +17,10 @@ Options
 -l, --layer-name            For GPKG files, specifies the layer-name, if unset, it will use the filename
 -b, --no-bbox               Does not calculate a bbox for each feature. (Bboxs are slower to generate, but may speed up calculations on the resulting file)
 ```
+## Build
+This repo doesn't include the built javascript files, so you will need to build them first
+`npm run build`
+
 ## Usage
 ### basic
 `npm run start -- --url URL`

@@ -1,10 +1,9 @@
-import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-types.js';
+import { EsriQueryObjectType } from '../helpers/esri-rest-types.js';
 import { default as esriPbf } from './esri-pbf.js';
 import fetch from 'node-fetch';
 
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import { ArcGISJsonRestType } from './esri-pbf-types.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -14,7 +13,7 @@ const toStringObj = (obj: { [key: string]: string | number | boolean }) =>
     .map(key => ({ key, value: obj[key].toString() }))
     .reduce((a, c) => ({ ...a, ...{ [c.key]: c.value } }), {});
 
-export default async function postAsync(url: string, query: EsriQueryObjectType): Promise<ArcGISJsonRestType | EsriFeatureLayerType | { count: number }> {
+export default async function postAsync(url: string, query: EsriQueryObjectType): Promise<unknown> {
   const format = query.f;
   const body = new URLSearchParams(toStringObj(query));
   let result;
@@ -39,7 +38,7 @@ export default async function postAsync(url: string, query: EsriQueryObjectType)
 
       return await esriPbf(cleanBuffer, __dirname + '../../../EsriFeatureCollection.proto');
     } else {
-      return await result.json() as ArcGISJsonRestType | EsriFeatureLayerType | { count: number };
+      return await result.json();
     }
   } catch (e) {
     if (!(e instanceof Error)) {

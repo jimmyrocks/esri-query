@@ -70,15 +70,13 @@ export default class EsriQuery {
   }
 
   async getSourceInfo() {
-    const source = await post({
-        url: this.options.url, query: {
-          f: 'json'
-        }
-      }) as EsriFeatureLayerType;
+    const source = await post(this.options.url, {
+      f: 'json'
+    }) as EsriFeatureLayerType;
 
     const countQuery = JSON.parse(JSON.stringify(this.whereObj));
     countQuery.returnCountOnly = true;
-    const countJsonPromise = post({ url: this.queryUrl, query: countQuery });
+    const countJsonPromise = post(this.queryUrl, countQuery);
 
     // Get all fields that aren't the geometry type
     this.fields = (source.fields)
@@ -201,7 +199,7 @@ export default class EsriQuery {
     newQueryObj.resultOffset = extent.min;
 
     try {
-      const data = await post({ url: this.queryUrl, query: newQueryObj }) as { features?: Array<EsriFeatureType>, error: string };
+      const data = await post(this.queryUrl, newQueryObj) as { features?: Array<EsriFeatureType>, error: string };
 
       if (data.features && data.features.length === 0) {
         //console.error('NO FEATURES LEFT');

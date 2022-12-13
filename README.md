@@ -44,6 +44,6 @@ npm run start -- \
 ```
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
---format geojsonseq \
---output ./example.geojsonseq
+--format gpkg \
+--output ./example.gpkg
 ```

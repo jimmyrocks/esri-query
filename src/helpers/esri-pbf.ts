@@ -39,16 +39,20 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
     };
   }
 
-  const featureResult = message.queryResult.featureResult;
+  const { featureResult } = message.queryResult;
   const fieldNames = featureResult.fields.map(field => field.name);
-  const transform = featureResult.transform;
-  const geometryType = featureResult.geometryType;
+  const { transform, geometryType } = featureResult;
+
   const features = featureResult.features.map(feature => {
 
     // Parse the Attributes
     const attributes = feature.attributes
-      .map((attribute, idx) => ({ key: fieldNames[idx], 'value': (attribute as any)[Object.keys(attribute)[0]] }))
-      .reduce((a, c) => ({ ...a, ...{ [c.key]: longToString(c.value) } }), {});
+      .map((attribute, idx) => ({ key: fieldNames[idx], 'value': attribute[attribute['value_type']] }))
+      .reduce((a: Object, c: any) => {
+        const newObj: any = {};
+        newObj[c.key] = longToString(c.value);
+        return { ...a, ...newObj };
+      }, {});
 
     // Parse the geometries and clean up the quantization
     if (feature.geometry !== null) {
@@ -57,8 +61,15 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
         feature.geometry.lengths;
 
       // Break into X and Y rings
-      const x = feature.geometry.coords.filter((_, idx) => idx % 2 === 0);
-      const y = feature.geometry.coords.filter((_, idx) => idx % 2 === 1);
+      const x: LongType[] = [];
+      const y: LongType[] = [];
+      feature.geometry.coords.forEach((coord, idx) => {
+        if (idx % 2 === 0) {
+          x.push(new Long(coord));
+        } else {
+          y.push(new Long(coord));
+        }
+      });
 
       // dezigzag the rings and merge + reproject then
       const ringsX = deZigZag(x, counts, transform.scale.xScale, transform.translate.xTranslate, false);
@@ -72,7 +83,7 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
             { 'paths': rings } :
             { 'rings': rings }
           ),
-        attributes: attributes
+        attributes
       };
     } else {
       return undefined

@@ -1,5 +1,4 @@
 import * as ArcGIS from 'arcgis-rest-api';
-import { Long } from 'protobufjs';
 
 export type ArcGISFeatureType = {
     geometry: ArcGIS.Geometry,
@@ -29,24 +28,14 @@ export type FieldType = {
     length?: number
 };
 
-export type ValueType = {
-    'string_value': string
-    'float_value': number,
-    'double_value': number,
-    'sint_value': number,
-    'uint_value': number,
-    'int64_value': Long,
-    'uint64_value': Long,
-    'sint64_value': Long,
-    'bool_value': boolean
-};
 
 export type FeatureType = {
-    attributes: Array<ValueType>,
-    geometry: {
-        lengths: Array<number>,
-        coords: Array<Long>
-    }
+    attributes: Array<{ [key: string]: any }>;
+    centroid?: any;
+    compressed_geometry: string;
+    geometry: { [key: string]: Array<number> };
+    length: number;
+    shapeBuffer?: any;
 };
 
 export type SpatialReferenceType = {
@@ -136,7 +125,7 @@ export type FeatureCollectionType = {
     queryResult: {
         featureResult: {
             fields: Array<FieldType>,
-            values: Array<ValueType>,
+            values: Array<any>,
             features: Array<FeatureType>,
             objectIdFieldName?: string,
             globalIdFieldName?: string,

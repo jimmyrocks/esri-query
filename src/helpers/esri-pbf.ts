@@ -55,7 +55,7 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       }, {});
 
     // Parse the geometries and clean up the quantization
-    if (feature.geometry !== null) {
+    if (feature.geometry !== null && feature.geometry.coords.length !== 0) {
       const counts = geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
         [1] :
         feature.geometry.lengths;

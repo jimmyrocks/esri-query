@@ -2,14 +2,14 @@ import protobuf, { Long as LongType } from 'protobufjs';
 import { default as Long } from 'long';
 import { ArcGISFeatureType, ArcGISJsonRestType, FeatureCollectionType, GeometryTypeEnum } from './esri-pbf-types.js';
 
-const deZigZag = (values: Array<LongType>, splits: Array<number>, scale: number, initialOffset: number, lowerLeftOrigin: boolean): number[][] =>
+const deZigZag = (values: Array<LongType>, splits: Array<number>, scale: number, initialOffset: number, upperLeftOrigin: boolean): number[][] =>
   splits.map((split, i) => {
     let previousValue: Long = Long.fromNumber(initialOffset / scale); // Start at the offset initially
     return (new Array(split)).fill(undefined).map((_, j) => {
       const valueOffset = splits.reduce((a, v, idx) => a += (idx < i ? v : 0), 0); // Tally up all the offsets before this one
       const value = values[valueOffset + j];
       const longValue = new Long(value.low, value.high, value.unsigned);
-      const sign = lowerLeftOrigin ? -1 : 1;
+      const sign = upperLeftOrigin ? -1 : 1;
 
       const returnValue: Long = (longValue.multiply(sign)).add(previousValue);
 
@@ -40,14 +40,15 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
   }
 
   const { featureResult } = message.queryResult;
-  const fieldNames = featureResult.fields.map(field => field.name);
   const { transform, geometryType } = featureResult;
-
   const features = featureResult.features.map(feature => {
 
     // Parse the Attributes
     const attributes = feature.attributes
-      .map((attribute, idx) => ({ key: fieldNames[idx], 'value': attribute[attribute['value_type']] }))
+      .map((attribute, idx) => ({
+        key: featureResult.fields[idx].name,
+        'value': attribute[Object.keys(attribute)[0]]
+      }))
       .reduce((a: Object, c: any) => {
         const newObj: any = {};
         newObj[c.key] = longToString(c.value);
@@ -55,39 +56,37 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       }, {});
 
     // Parse the geometries and clean up the quantization
-    if (feature.geometry !== null && feature.geometry.coords.length !== 0) {
-      const counts = geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
-        [1] :
-        feature.geometry.lengths;
+    //if (feature.geometry !== null /*&& feature.geometry.coords.length !== 0*/) {
+    const counts = geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
+      [1] :
+      feature.geometry.lengths as Array<number>;
 
-      // Break into X and Y rings
-      const x: LongType[] = [];
-      const y: LongType[] = [];
-      feature.geometry.coords.forEach((coord, idx) => {
-        if (idx % 2 === 0) {
-          x.push(new Long(coord));
-        } else {
-          y.push(new Long(coord));
-        }
-      });
+    // Break into X and Y rings
+    const x: LongType[] = [];
+    const y: LongType[] = [];
+    (feature.geometry.coords).forEach((coord, idx) => {
+      const longCoord = coord as unknown as Long;
+      if (idx % 2 === 0) {
+        x.push(new Long(longCoord.low, longCoord.high, longCoord.unsigned));
+      } else {
+        y.push(new Long(longCoord.low, longCoord.high, longCoord.unsigned));
+      }
+    });
 
-      // dezigzag the rings and merge + reproject then
-      const ringsX = deZigZag(x, counts, transform.scale.xScale, transform.translate.xTranslate, false);
-      const ringsY = deZigZag(y, counts, transform.scale.yScale, transform.translate.yTranslate, transform.quantizeOriginPostion === 0);
-      const rings = ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]]));
+    // dezigzag the rings and merge them
+    const ringsX = deZigZag(x, counts, transform.scale.xScale, transform.translate.xTranslate, false);
+    const ringsY = deZigZag(y, counts, transform.scale.yScale, transform.translate.yTranslate, transform.quantizeOriginPostion === 0);
+    const rings = ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]]));
 
-      return {
-        geometry: geometryType === 0 ?
-          { x: rings[0][0][0], y: rings[0][0][1] } :
-          (geometryType === GeometryTypeEnum.esriGeometryTypePolyline ?
-            { 'paths': rings } :
-            { 'rings': rings }
-          ),
-        attributes
-      };
-    } else {
-      return undefined
-    }
+    return {
+      geometry: geometryType === 0 ?
+        { x: rings[0][0][0], y: rings[0][0][1] } :
+        (geometryType === GeometryTypeEnum.esriGeometryTypePolyline ?
+          { 'paths': rings } :
+          { 'rings': rings }
+        ),
+      attributes
+    };
   }).filter(f => f !== undefined);
   return {
     features: features as Array<ArcGISFeatureType>,

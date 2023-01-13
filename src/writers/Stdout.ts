@@ -21,7 +21,9 @@ export default class Stdout extends Writer {
       this.strings.header = this.strings.footer = this.strings.bboxFooter = null;
       this.strings.delimiter = '\n';
     }
-    this.writeHeader();
+    if (!this.headerStatus.hasHeader) {
+      this.writeHeader();
+    }
   }
 
   close() {

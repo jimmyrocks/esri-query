@@ -40,10 +40,10 @@ npm run start -- \
 ```
 
 #### geopackage to file example
-([Geopackages](https://www.geopackage.org/) use SQLite and perform much faster than GeoJSON files. `esri-query` does not )
+([Geopackages](https://www.geopackage.org/) use SQLite and perform much faster than GeoJSON files. `esri-query` does not use SpatialLite, and therefore does not add a SpatialIndex to the GPKG)
 ```
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
---format gpkg \
---output ./example.gpkg
+--format geojsonseq \
+--output ./example.geojsonseq
 ```

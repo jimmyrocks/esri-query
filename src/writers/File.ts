@@ -7,9 +7,7 @@ export default class File extends Stdout {
 
     open() {
         this.fileId = openSync(this.options.output, 'a');
-        if (!this.headerStatus.hasHeader) {
-            this.writeHeader();
-        }
+        super.open();
     };
 
     close() {

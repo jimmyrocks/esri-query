@@ -2,21 +2,43 @@ import protobuf, { Long as LongType } from 'protobufjs';
 import { default as Long } from 'long';
 import { ArcGISFeatureType, ArcGISJsonRestType, FeatureCollectionType, GeometryTypeEnum } from './esri-pbf-types.js';
 
+/**
+ * Given an array of LongType values, split them up into arrays of length `splits`.
+ * Return an array of arrays of number values that have been transformed to undo zigzag encoding.
+ * 
+ * @param values An array of LongType values representing a polyline or polygon
+ * @param splits An array of integers representing the number of values in each part of the polyline or polygon
+ * @param scale The scale factor used to convert the LongType values to number values
+ * @param initialOffset The initial offset used to convert the LongType values to number values
+ * @param upperLeftOrigin A boolean indicating whether the origin is in the upper left (true) or lower left (false)
+ * @returns An array of arrays of number values representing the unzizagged polyline or polygon
+ */
 const deZigZag = (values: Array<LongType>, splits: Array<number>, scale: number, initialOffset: number, upperLeftOrigin: boolean): number[][] =>
+  // For each part of the polyline or polygon...
   splits.map((split, i) => {
-    let previousValue: Long = Long.fromNumber(initialOffset / scale); // Start at the offset initially
+    // Initialize the previous value to the initial offset
+    let previousValue: Long = Long.fromNumber(initialOffset / scale);
+    
+    // For each value in the current part...
     return (new Array(split)).fill(undefined).map((_, j) => {
+      // Clculate the offset for the current value
       const valueOffset = splits.reduce((a, v, idx) => a += (idx < i ? v : 0), 0); // Tally up all the offsets before this one
+      
+      // Get the current value and convert it to the Long type
       const value = values[valueOffset + j];
       const longValue = new Long(value.low, value.high, value.unsigned);
+      
+      // Calculate the sign based on the origin position (If it's upperLeft, we substract, otherwise we add)
       const sign = upperLeftOrigin ? -1 : 1;
 
-      const returnValue: Long = (longValue.multiply(sign)).add(previousValue);
+      // Apply the zigzag decoding. Add or substract the long value from the previous value (depending on the origin position)
+      const returnLong: Long = (longValue.multiply(sign)).add(previousValue);
+      // Set the current value to the previous value
+      previousValue = returnLong;
 
-      previousValue = returnValue;
-
-      return returnValue;
-    }).map(v => v.toNumber() * scale);
+      // Convert the value to a number and scale it
+      return returnLong.toNumber() * scale;
+    })
   })
 
 const longToString = (value: (Long | number | string)) => {
@@ -43,13 +65,14 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
   const { transform, geometryType } = featureResult;
   const features = featureResult.features.map(feature => {
 
-    // Parse the Attributes
+    // Parse the Attributes of the feature
     const attributes = feature.attributes
       .map((attribute, idx) => ({
         key: featureResult.fields[idx].name,
-        'value': attribute[Object.keys(attribute)[0]]
+        value: attribute[Object.keys(attribute)[0]] // Get the attribute's value
       }))
       .reduce((a: Object, c: any) => {
+        // Convert the value to a string and create a new object with the key and string value
         const newObj: any = {};
         newObj[c.key] = longToString(c.value);
         return { ...a, ...newObj };
@@ -61,7 +84,7 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       [1] :
       feature.geometry.lengths as Array<number>;
 
-    // Break into X and Y rings
+    // Break the coords into X and Y rings
     const x: LongType[] = [];
     const y: LongType[] = [];
     (feature.geometry.coords).forEach((coord, idx) => {
@@ -78,6 +101,7 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
     const ringsY = deZigZag(y, counts, transform.scale.yScale, transform.translate.yTranslate, transform.quantizeOriginPostion === 0);
     const rings = ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]]));
 
+    // Return the geometry and attributes for the feature
     return {
       geometry: geometryType === 0 ?
         { x: rings[0][0][0], y: rings[0][0][1] } :
@@ -88,6 +112,8 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       attributes
     };
   }).filter(f => f !== undefined);
+  
+  // Create and return the result object
   return {
     features: features as Array<ArcGISFeatureType>,
     exceededTransferLimit: featureResult.exceededTransferLimit,

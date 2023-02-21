@@ -69,23 +69,31 @@ export default class EsriQuery {
     }
   }
 
+  /**
+   * Gets the source info for an Esri feature or map service
+   * @returns A promise containing the Esri Feature Layer
+   */
   async getSourceInfo() {
+    // Make a post request for the source info
     const source = await post(this.options.url, {
       f: 'json'
     }) as EsriFeatureLayerType;
 
+    // Make a second request for the feature count
     const countQuery = JSON.parse(JSON.stringify(this.whereObj));
     countQuery.returnCountOnly = true;
     const countJsonPromise = post(this.queryUrl, countQuery);
 
     // Get all fields that aren't the geometry type
+    // Add a "sortable" property, since some fields (geometries) are not sortable
+    // Reduce the array into key/value pairs
     this.fields = (source.fields)
       .map((field: typeof this.fields[0]) => {
         field.sortable = field.type !== 'esriFieldTypeGeometry' && field.name.indexOf('()') === -1;
         return field;
       }).reduce((a, c) => ({ ...a, ...{ [c.name]: c } }), {});
 
-    // Update the feature count for whichever is less
+    // Update the feature count for whichever is less, the user specified value or the maxRecordCount
     this.options['feature-count'] = (typeof this.options['feature-count'] === 'number') ?
       Math.min(this.options['feature-count'] || source.maxRecordCount) :
       source.maxRecordCount;
@@ -95,6 +103,8 @@ export default class EsriQuery {
 
     // Move this source into the sourceInfo variable
     this.sourceInfo = source;
+
+    // Wait for the countJsonPromise to complete and get the feature count
     this.totalFeatureCount = ((await countJsonPromise) as { 'count': number }).count;
 
     return this.sourceInfo;

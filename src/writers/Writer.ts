@@ -1,5 +1,5 @@
 /* eslint-env node, es6 */
-import { CliOptionsType } from '../index.js';
+import { CliOptionsType } from '..';
 import { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
 
 export default class Writer {

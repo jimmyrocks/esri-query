@@ -2,6 +2,10 @@ import { Feature, Geometry } from 'geojson';
 import { CliGeoJsonOptionsType, CliBaseOptionsType } from '..';
 import Writer from './Writer.js';
 
+/**
+ * Stdout is a Writer implementation that writes output to the console.
+ * The format is geojson or geojsonseq.
+ */
 export default class Stdout extends Writer {
   strings = {
     header: '{"type": "FeatureCollection", "features": [',
@@ -30,10 +34,19 @@ export default class Stdout extends Writer {
     this.writeFooter();
   }
 
+  /**
+    * Writes a string to the console.
+    * @param line The string to write.
+    */
   writeString(line: string) {
     process.stdout.write(line);
   };
 
+  /**
+ * Writes a GeoJSON feature to the console.
+ * @param line The GeoJSON feature to write.
+ * @returns The same feature that was written.
+ */
   writeFeature(line: Feature<Geometry, { [name: string]: any; }>): Feature<Geometry, { [name: string]: any; }> {
     line = super.writeFeature(line);
     const lineStr = JSON.stringify(line, null, this.options.pretty ? 2 : 0);

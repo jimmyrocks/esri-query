@@ -3,8 +3,8 @@ import { default as Long } from 'long';
 import { ArcGISFeatureType, ArcGISJsonRestType, FeatureCollectionType, GeometryTypeEnum } from './esri-pbf-types.js';
 
 /**
- * Given an array of LongType values, split them up into arrays of length `splits`.
- * Return an array of arrays of number values that have been transformed to undo zigzag encoding.
+ * Takes an array of LongType values, splits them up into arrays of length `splits`.
+ * Returns an array of arrays of number values that have been transformed to undo zigzag encoding.
  * 
  * @param values An array of LongType values representing a polyline or polygon
  * @param splits An array of integers representing the number of values in each part of the polyline or polygon
@@ -18,16 +18,16 @@ const deZigZag = (values: Array<LongType>, splits: Array<number>, scale: number,
   splits.map((split, i) => {
     // Initialize the previous value to the initial offset
     let previousValue: Long = Long.fromNumber(initialOffset / scale);
-    
+
     // For each value in the current part...
     return (new Array(split)).fill(undefined).map((_, j) => {
       // Clculate the offset for the current value
       const valueOffset = splits.reduce((a, v, idx) => a += (idx < i ? v : 0), 0); // Tally up all the offsets before this one
-      
+
       // Get the current value and convert it to the Long type
       const value = values[valueOffset + j];
       const longValue = new Long(value.low, value.high, value.unsigned);
-      
+
       // Calculate the sign based on the origin position (If it's upperLeft, we substract, otherwise we add)
       const sign = upperLeftOrigin ? -1 : 1;
 
@@ -41,6 +41,11 @@ const deZigZag = (values: Array<LongType>, splits: Array<number>, scale: number,
     })
   })
 
+/**
+* Converts a Long, number, or string value to a string.
+* @param value - The value to convert.
+* @returns The converted string value, or null if the input value is undefined.
+*/
 const longToString = (value: (Long | number | string)) => {
   if (value === undefined) {
     return null;
@@ -51,7 +56,15 @@ const longToString = (value: (Long | number | string)) => {
   }
 };
 
+/**
+ * Convert a FeatureCollectionType PBF message to an ArcGISJsonRestType object
+ * ArcGISJsonRestType Objects can then be converted with Terraformer
+ *
+ * @param message The FeatureCollectionType message to convert
+ * @returns An ArcGISJsonRestType object
+ */
 const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
+  // If no query result, log error message and return empty features and fields
   if (message.queryResult === null) {
     console.error('No results in PBF');
     return {
@@ -79,7 +92,6 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       }, {});
 
     // Parse the geometries and clean up the quantization
-    //if (feature.geometry !== null /*&& feature.geometry.coords.length !== 0*/) {
     const counts = geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
       [1] :
       feature.geometry.lengths as Array<number>;
@@ -88,11 +100,10 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
     const x: LongType[] = [];
     const y: LongType[] = [];
     (feature.geometry.coords).forEach((coord, idx) => {
-      const longCoord = coord as unknown as Long;
       if (idx % 2 === 0) {
-        x.push(new Long(longCoord.low, longCoord.high, longCoord.unsigned));
+        x.push(new Long(coord.low, coord.high, coord.unsigned));
       } else {
-        y.push(new Long(longCoord.low, longCoord.high, longCoord.unsigned));
+        y.push(new Long(coord.low, coord.high, coord.unsigned));
       }
     });
 
@@ -112,7 +123,7 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       attributes
     };
   }).filter(f => f !== undefined);
-  
+
   // Create and return the result object
   return {
     features: features as Array<ArcGISFeatureType>,
@@ -134,3 +145,5 @@ export default async function esriPbf(arrayBuffer: Uint8Array, protoFile: string
   const esriFeatureCollection = messageLoader.decode(arrayBuffer) as unknown as FeatureCollectionType;
   return messageToJson(esriFeatureCollection);
 };
+
+export { longToString, deZigZag, messageToJson }; // Export for testing

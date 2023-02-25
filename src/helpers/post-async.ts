@@ -27,7 +27,7 @@ const toStringObj = (obj: { [key: string]: string | number | boolean }) =>
 export default async function postAsync(url: string, query: EsriQueryObjectType): Promise<unknown> {
   // Extract the response format from the esri query object.
   const format = query.f;
-  
+
   // Convert the query object to a URL-encoded string.
   const body = new URLSearchParams(toStringObj(query));
   let result;

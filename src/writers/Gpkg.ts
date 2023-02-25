@@ -5,22 +5,35 @@ import { EventEmitter } from 'events';
 import path from 'path';
 
 import { default as wkx } from 'wkx';
-import { EsriFeatureLayerType } from '../helpers/esri-rest-types';
+import { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
 import { CliBaseOptionsType, CliGeoJsonOptionsType, CliSqlOptionsType } from '..';
 
-class SqliteDb {
+/**
+ * A wrapper class for the `sqlite3` package, providing a simplified API for working with an SQLite database.
+ */
+export class SqliteDb {
+  /** The `sqlite3` database object. */
   db: sqlite.Database;
+  /** The event emitter instance used to emit and listen to events. */
   events: EventEmitter = new EventEmitter();
+  /** Whether the database has finished loading. */
   loaded: boolean = false;
 
+  /**
+   * Creates a new `SqliteDb` instance.
+   * @param filename The filename of the SQLite database to open.
+   */
   constructor(filename: string) {
+    // Listen for error events on the event emitter and log them to the console
     this.events.on('error', console.error);
+    // Create a new `sqlite3` database instance and run the `initializeGeoPackageCommands()` to create a GeoPackage database
     this.db = new sqlite.Database(filename, (e: Error) => {
       if (e) {
         this.events.emit('error', e);
       } else {
         // TODO check if it's already a geopackage
         this.runList(initializeGeoPackageCommands()).then(() => {
+          // Mark the database as loaded and emit a "load" event
           this.loaded = true;
           this.events.emit('load', this);
         }).catch(e => this.events.emit('error', e))
@@ -28,24 +41,49 @@ class SqliteDb {
     })
   }
 
-  async runList(sql: string) {
+  /**
+   * Runs a list of SQL statements against the database.
+   * @param sql The SQL statements to run, separated by semicolons.
+   * @returns A promise that resolves when all the SQL statements have finished executing.
+   */
+  async runList(sql: string): Promise<void> {
+    // Split the SQL statements by semicolons, filter out any empty statements, and add the semicolon back to each statement
     const cmds = sql.split(';').filter(v => v.trim().length > 0).map(v => v + ';');
+    // Run each SQL statement in sequence, waiting for each one to finish before running the next one
     for (const cmd of cmds) {
       await this.run(cmd);
     }
     return;
   }
 
-  run(sql: string, params: Array<string | number> = []) {
+  /**
+   * Runs a single SQL statement against the database.
+   * @param sql The SQL statement to run.
+   * @param params Optional parameters to substitute into the SQL statement.
+   * @returns A promise that resolves with the result of the SQL statement.
+   */
+  run(sql: string, params: Array<string | number> = []): Promise<unknown> {
     return new Promise((res, rej) =>
       this.db.run(sql, params, (e: Error, r: unknown) =>
         e ? rej(e) : res(r)
       ));
   }
 
+  get(sql: string, params: Array<string | number> = []): Promise<Array<{ [key: string]: any }>> {
+    return new Promise((res, rej) =>
+      this.db.all(sql, params, (e: Error, r: Array<{ [key: string]: any }>) =>
+        e ? rej(e) : res(r)
+      ));
+  }
+
+  /**
+   * Closes the database connection.
+   * @returns A promise that resolves when the connection has been closed.
+   */
   close(): Promise<void> {
     return new Promise((res, rej) =>
       this.db.close((e: Error) => {
+        // Emit a "close" event when the database has been closed
         this.events.emit('close', this);
         e ? rej(e) : res();
       }));
@@ -70,7 +108,7 @@ export default class Gpkg extends Writer {
   geometryColumnName: string = 'the_geom'; //TODO option
   declare options: CliBaseOptionsType & CliSqlOptionsType;
 
-  constructor(options: CliBaseOptionsType & (CliSqlOptionsType | CliGeoJsonOptionsType), sourceInfo?: EsriFeatureLayerType) {
+  constructor(options: CliBaseOptionsType & (CliSqlOptionsType | CliGeoJsonOptionsType), sourceInfo: EsriFeatureLayerType) {
     super(options, sourceInfo);
     if (!this.options.output) throw new Error('Output filename required for GPKG format.');
     if (!this.options['layer-name']) {
@@ -241,6 +279,11 @@ export default class Gpkg extends Writer {
     }
   };
 
+  /**
+  *  Converts a GeoJSON feature into a GeoPackage binary format buffer.
+  *  @param feature - The GeoJSON feature to convert.
+  *  @returns A buffer containing the GeoPackage binary format representation of the feature.
+  */
   _geojsonToGpkg(feature: GeoJSON.Feature): Buffer {
     //https://www.geopackage.org/spec/#gpb_format
     /**
@@ -265,19 +308,26 @@ export default class Gpkg extends Writer {
       return b;
     };
 
+    // Create the well known binary version of the GeoJSON Feature Geometry
     const geom = wkx.Geometry.parseGeoJSON(feature.geometry);
 
+    // Create the standard Geo Package Binary
     const standardGeoPackageBinary = [
       generateBuffer(8, b => {
         b.write('GP');
         b.writeUInt8(0, 2);
+
+        // Generate the flags
         let flags = 0;
         flags += 1; // Use little endian, since WKX outputs LE and the spec says it should be consistent
         if (feature.bbox) flags += 1 << 1; // 1: envelope is [minx, maxx, miny, maxy], 32 bytes
-        b.writeUInt8(flags, 3); // flags 
+        b.writeUInt8(flags, 3); // write the flags 
+
+        // Write out the EPSG (Always 4326 (TODO allow others?))
         b.writeUInt32LE(4326, 4);
       }),
       generateBuffer(feature.bbox ? 32 : 0, b => {
+        // TODO Is this useful? We could generate a bbox from the GeoJSON as well
         if (feature.bbox) {
           b.writeDoubleLE(feature.bbox[0], 0); // minx
           b.writeDoubleLE(feature.bbox[2], 8); // maxx
@@ -294,6 +344,9 @@ export default class Gpkg extends Writer {
 };
 // These are taken from the empty geopackage template
 // http://www.geopackage.org/data/empty.gpkg
+
+// I added some fields to the layer_styles, they _may_ cause issues
+// https://gis.stackexchange.com/questions/341720/write-layer-style-qml-as-predefined-within-a-gpkg-using-r
 const initializeGeoPackageCommands = () => `
     PRAGMA foreign_keys = OFF;
     PRAGMA application_id = 1196444487;

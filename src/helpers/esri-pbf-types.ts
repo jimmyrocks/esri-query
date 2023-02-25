@@ -1,4 +1,5 @@
 import * as ArcGIS from 'arcgis-rest-api';
+import { Long as LongType } from 'protobufjs';
 
 export type ArcGISFeatureType = {
     geometry: ArcGIS.Geometry,
@@ -28,12 +29,11 @@ export type FieldType = {
     length?: number
 };
 
-
 export type FeatureType = {
     attributes: Array<{ [key: string]: any }>;
     centroid?: any;
     compressed_geometry: string;
-    geometry: { [key: string]: Array<number> };
+    geometry: { lengths: number[], coords: LongType[] };
     length: number;
     shapeBuffer?: any;
 };

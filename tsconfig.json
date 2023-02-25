@@ -6,6 +6,7 @@
         "allowSyntheticDefaultImports": true,
         "target": "ESNext",
         "noImplicitAny": true,
+        "skipLibCheck": true,
         "sourceMap": true,
         "outDir": "dist",
         "baseUrl": ".",
@@ -18,5 +19,11 @@
     },
     "include": [
         "src/**/*"
-    ]
+    ],
+    "typedocOptions": {
+        "entryPoints": [
+            "src/index.ts"
+        ],
+        "out": "docs"
+    }
 }

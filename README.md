@@ -59,7 +59,7 @@ By default, the output is printed to the console in GeoJSON format. You can spec
 npm run start -- --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2"
 ``` 
 
-#### GeoJSONSeq to File Example
+#### to GeoJSONSeq File Example
 
 ```bash
 npm run start -- \
@@ -68,7 +68,7 @@ npm run start -- \
 --output ./example.geojsonseq
 ``` 
 
-#### GeoPackage to File Example
+#### to GeoPackage File Example
 
 ```bash
 npm run start -- \

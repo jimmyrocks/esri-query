@@ -1,49 +1,78 @@
+
 # esri-query
 
-Extracts data from ESRI REST endpoints when nothing else will
+`esri-query` is a command-line tool that extracts data from ESRI REST endpoints when nothing else will.
 
-```
-Options
+## Table of Contents
 
--h, --help                  Display this usage guide.
--u, --url <url>             The URL of the ESRI Rest Endpoint. (ex. https://.../FeatureServer/0)
--w, --where string          ESRI Style Where (Defaults to 1=1)
--f, --format string         [gpkg, geojson, geojsonseq]
--o, --output string         The file to write out (if set, type becomes file)
--y, --pretty                Pretty Print JSON (line-delimited will override this)
--f, --feature-count number  Features per query (Default is server default)
--j, --json                  Use ESRI json to download data (otherwise it will try to use the esri PBF format)
--p, --progress              Show progress during the process
--l, --layer-name            For GPKG files, specifies the layer-name, if unset, it will use the filename
--b, --no-bbox               Does not calculate a bbox for each feature. (Bboxs are slower to generate, but may speed up calculations on the resulting file)
+-   [Installation](#installation)
+-   [Usage](#usage)
+-   [Options](#options)
+
+## Installation
+
+To install `esri-query`, you need to have Node.js installed. You will then need to build it.
+
+
+
+```bash
+git clone https://github.com/jimmyrocks/esri-query.git
+cd ./esri-query
+npm run build
 ```
-## Build
-This repo doesn't include the built javascript files, so you will need to build them first
-`npm run build`
 
 ## Usage
-### basic
-`npm run start -- --url URL`
 
-#### simplest geojson example
-```
+To use `esri-query`, run the following command in your terminal:
 
-npm run start -- "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2"
-```
-#### geojsonseq to file example
-([Geojsonseq](https://gdal.org/drivers/vector/geojsonseq.html) is useful for gdal tools)
-```
+
+
+```bash
+esri-query --url <URL>
+``` 
+
+The `<URL>` should be the URL of the ESRI REST endpoint, for example `https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2`.
+
+By default, the output is printed to the console in GeoJSON format. You can specify other options using flags, as shown in the [Options](#options) section.
+
+## Options
+
+| Flag | Description                                                                                         |
+| ------------------------| --------------------------------------------------------------------------------------------------- |
+| -h, --help               | Display this usage guide.                                                                           |
+| -u, --url <url>          | The URL of the ESRI Rest Endpoint. MapServer or Feature Server (ex. https://.../FeatureServer/0)                                 |
+| -w, --where string       | ESRI Style Where (Defaults to 1=1)                                                                  |
+| -f, --format string      | [gpkg, geojson, geojsonseq]                                                                         |
+| -o, --output string      | The file to write out (if set, type becomes file)                                                  |
+| -y, --pretty             | Pretty Print JSON (line-delimited will override this)                                              |
+| -f, --feature-count num  | Features per query (Default is server default)                                                     |
+| -j, --json               | Use ESRI json to download data (otherwise it will try to use the esri PBF format)                  |
+| -p, --progress           | Show progress during the process                                                                   |
+| -l, --layer-name         | For GPKG files, specifies the layer-name, if unset, it will use the filename                        |
+| -b, --no-bbox            | Does not calculate a bbox for each feature. (Bboxs are slower to generate, but may speed up calculations on the resulting file) |
+
+### Examples
+
+#### Simplest GeoJSON Example
+
+```bash
+npm run start -- --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2"
+``` 
+
+#### GeoJSONSeq to File Example
+
+```bash
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
 --format geojsonseq \
 --output ./example.geojsonseq
-```
+``` 
 
-#### geopackage to file example
-([Geopackages](https://www.geopackage.org/) use SQLite and perform much faster than GeoJSON files. `esri-query` does not use SpatialLite, and therefore does not add a SpatialIndex to the GPKG)
-```
+#### GeoPackage to File Example
+
+```bash
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
---format geojsonseq \
---output ./example.geojsonseq
+--format gpkg \
+--output ./example.gpkg
 ```

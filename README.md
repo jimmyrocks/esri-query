@@ -11,9 +11,9 @@
 
 ## Installation
 
-To install `esri-query`, you need to have Node.js installed. You will then need to build it.
+To install `esri-query`, you need to have [Node.js](https://nodejs.org/en/download) installed.
 
-
+You will then need to build it:
 
 ```bash
 git clone https://github.com/jimmyrocks/esri-query.git

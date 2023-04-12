@@ -13,33 +13,49 @@ import { ArcGISFeatureType, ArcGISJsonRestType, FeatureCollectionType, GeometryT
  * @param upperLeftOrigin A boolean indicating whether the origin is in the upper left (true) or lower left (false)
  * @returns An array of arrays of number values representing the unzizagged polyline or polygon
  */
-const deZigZag = (values: Array<LongType>, splits: Array<number>, scale: number, initialOffset: number, upperLeftOrigin: boolean): number[][] =>
-  // For each part of the polyline or polygon...
-  splits.map((split, i) => {
+const deZigZag = (
+  values: Array<LongType>,
+  splits: Array<number>,
+  scale: number,
+  initialOffset: number,
+  upperLeftOrigin: boolean
+): number[][] => {
+  // Function to process each polyline or polygon part
+  const processPart = (split: number, i: number) => {
     // Initialize the previous value to the initial offset
     let previousValue: Long = Long.fromNumber(initialOffset / scale);
 
-    // For each value in the current part...
-    return (new Array(split)).fill(undefined).map((_, j) => {
-      // Clculate the offset for the current value
-      const valueOffset = splits.reduce((a, v, idx) => a += (idx < i ? v : 0), 0); // Tally up all the offsets before this one
+    // Function to process each value in the current part
+    const processValue = (_: undefined, j: number) => {
+      // Calculate the offset for the current value
+      const valueOffset = splits.reduce(
+        (accumulator, splitValue, index) =>
+          accumulator + (index < i ? splitValue : 0),
+        0
+      );
 
       // Get the current value and convert it to the Long type
       const value = values[valueOffset + j];
       const longValue = new Long(value.low, value.high, value.unsigned);
 
-      // Calculate the sign based on the origin position (If it's upperLeft, we substract, otherwise we add)
+      // Calculate the sign based on the origin position
       const sign = upperLeftOrigin ? -1 : 1;
 
-      // Apply the zigzag decoding. Add or substract the long value from the previous value (depending on the origin position)
-      const returnLong: Long = (longValue.multiply(sign)).add(previousValue);
-      // Set the current value to the previous value
-      previousValue = returnLong;
+      // Apply the zigzag decoding and update the previous value
+      const decodedValue: Long = longValue.multiply(sign).add(previousValue);
+      previousValue = decodedValue;
 
       // Convert the value to a number and scale it
-      return returnLong.toNumber() * scale;
-    })
-  })
+      return decodedValue.toNumber() * scale;
+    };
+
+    // Process each value in the current part
+    return new Array(split).fill(undefined).map(processValue);
+  };
+
+  // Process each part of the polyline or polygon
+  return splits.map(processPart);
+};
 
 /**
 * Converts a Long, number, or string value to a string.
@@ -92,10 +108,6 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
       }, {});
 
     // Parse the geometries and clean up the quantization
-    const counts = geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
-      [1] :
-      feature.geometry.lengths as Array<number>;
-
     // Break the coords into X and Y rings
     const x: LongType[] = [];
     const y: LongType[] = [];
@@ -108,14 +120,15 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
     });
 
     // dezigzag the rings and merge them
+    const counts = feature.geometry.lengths as Array<number>;
     const ringsX = deZigZag(x, counts, transform.scale.xScale, transform.translate.xTranslate, false);
     const ringsY = deZigZag(y, counts, transform.scale.yScale, transform.translate.yTranslate, transform.quantizeOriginPostion === 0);
     const rings = ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]]));
 
     // Return the geometry and attributes for the feature
     return {
-      geometry: geometryType === 0 ?
-        { x: rings[0][0][0], y: rings[0][0][1] } :
+      geometry: geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
+        (counts.length ? { x: rings[0][0][0], y: rings[0][0][1] } : {x: NaN, y: NaN}) :
         (geometryType === GeometryTypeEnum.esriGeometryTypePolyline ?
           { 'paths': rings } :
           { 'rings': rings }

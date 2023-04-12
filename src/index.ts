@@ -59,26 +59,25 @@ try {
   options = commandLineArgs(optionDefinitions)._all as CliOptionsType;
 } catch (e) {
   options.help = true;
-  let [_, __, ...args] = process.argv;
+  let [, , ...args] = process.argv;
   console.log('Unknown CLI Usage: ', ...args);
 }
 
 // If the user selects `help`, print the usage and exit the application
 if (options.help) {
   console.log(usage);
-  process.exit();
+  process.exitCode = 0;
 } else {
-  // Otherwise, create a new instance of `EsriQuery` with the specified options.
   const Query = new EsriQuery(options);
-
-  // Start the query and wait for the result.
   Query.start()
     .then((result: EsriQuery['runtimeParams']) => {
-      // If the `progress` option is specified, report the progress (feature count and total run time) to stderr.
       if (options.progress) {
-        console.error(`Complete with: ${result.featureCount} features in ${result.runTime} seconds`);
+        process.stderr.write(`Complete with: ${result.featureCount} features in ${result.runTime} seconds\n`);
       }
+      process.exitCode = 0;
     })
-    // If there's an error, write it out to stderr
-    .catch(console.error);
+    .catch((error) => {
+      process.stderr.write(`Error: ${error.message}\n`);
+      process.exitCode = 1;
+    });
 }

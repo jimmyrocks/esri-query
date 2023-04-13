@@ -142,6 +142,14 @@ export default class Gpkg extends Writer {
       esriGeometryEnvelope: 'GEOMETRY'
     };
 
+    const gpkgOgrContents = `INSERT INTO "gpkg_ogr_contents" (
+      table_name,
+      feature_count
+      ) VALUES (?,?)
+      `;
+    const gpkgOgrParams = [this.options['layer-name'], this.status.records];
+
+
     // Create the table for the new dataset
     const createColumns = Object.keys(this.columns)
       .map(name => '"' + name + '" ' + this.columns[name])
@@ -151,6 +159,7 @@ export default class Gpkg extends Writer {
 
     this.addCommand(createTableStatement);
     this.addCommand(gpkgContent, gpkgParams);
+    this.addCommand(gpkgOgrContents, gpkgOgrParams);
 
     // Set up the geometry columns
     this.addCommand('INSERT INTO "gpkg_geometry_columns" (table_name, column_name, geometry_type_name, srs_id, z, m) VALUES (?,?,?,?,?,?);', [
@@ -178,6 +187,11 @@ export default class Gpkg extends Writer {
         [...this.status.bbox, this.options['layer-name']]
       );
     }
+    // Write out the ogr contents
+    this.addCommand(
+      `UPDATE "gpkg_ogr_contents" SET feature_count = ? WHERE "table_name" = ?;`,
+      [this.status.records, this.options['layer-name']]
+    );
     this.closing = true;
     this.runBacklog();
     this.status.canWrite = false;
@@ -353,6 +367,7 @@ const initializeGeoPackageCommands = () => `
     PRAGMA user_version = 10200;
     BEGIN TRANSACTION;
     CREATE TABLE gpkg_spatial_ref_sys(srs_name TEXT NOT NULL, srs_id INTEGER NOT NULL PRIMARY KEY, organization TEXT NOT NULL, organization_coordsys_id INTEGER NOT NULL, definition  TEXT NOT NULL, description TEXT);
+    CREATE TABLE gpkg_ogr_contents (table_name text, feature_count int);
     INSERT INTO gpkg_spatial_ref_sys VALUES('Undefined cartesian SRS', -1, 'NONE', -1, 'undefined', 'undefined cartesian coordinate reference system');
     INSERT INTO gpkg_spatial_ref_sys VALUES('Undefined geographic SRS', 0, 'NONE', 0, 'undefined', 'undefined geographic coordinate reference system');
     INSERT INTO gpkg_spatial_ref_sys VALUES('WGS 84 geodetic', 4326, 'EPSG', 4326, 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]]', 'longitude/latitude coordinates in decimal degrees on the WGS 84 spheroid');

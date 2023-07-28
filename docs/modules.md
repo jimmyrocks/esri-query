@@ -33,7 +33,7 @@
 
 #### Defined in
 
-[index.ts:8](https://github.com/jimmyrocks/esri-query/blob/74f99a0/src/index.ts#L8)
+[index.ts:8](https://github.com/jimmyrocks/esri-query/blob/b4b4cc2/src/index.ts#L8)
 
 ___
 
@@ -50,7 +50,7 @@ ___
 
 #### Defined in
 
-[index.ts:20](https://github.com/jimmyrocks/esri-query/blob/74f99a0/src/index.ts#L20)
+[index.ts:20](https://github.com/jimmyrocks/esri-query/blob/b4b4cc2/src/index.ts#L20)
 
 ___
 
@@ -60,7 +60,7 @@ ___
 
 #### Defined in
 
-[index.ts:31](https://github.com/jimmyrocks/esri-query/blob/74f99a0/src/index.ts#L31)
+[index.ts:31](https://github.com/jimmyrocks/esri-query/blob/b4b4cc2/src/index.ts#L31)
 
 ___
 
@@ -78,4 +78,4 @@ ___
 
 #### Defined in
 
-[index.ts:25](https://github.com/jimmyrocks/esri-query/blob/74f99a0/src/index.ts#L25)
+[index.ts:25](https://github.com/jimmyrocks/esri-query/blob/b4b4cc2/src/index.ts#L25)

@@ -61,6 +61,8 @@ npm run start -- --url "https://sampleserver6.arcgisonline.com/arcgis/rest/servi
 
 #### to GeoJSONSeq File Example
 
+GeoJSONSeq allows parallel processing in Tippecanoe
+
 ```bash
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
@@ -70,9 +72,21 @@ npm run start -- \
 
 #### to GeoPackage File Example
 
+GeoPackages load into PostgreSQL much faster than GeoJSON or GeoJSONSeq
+
 ```bash
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
 --format gpkg \
 --output ./example.gpkg
 ```
+
+## Testing
+
+To test `esri-query`, run the following command in your terminal:
+
+
+
+```bash
+npm run test
+``` 

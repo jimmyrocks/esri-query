@@ -18,14 +18,14 @@
     "url": "git+https://github.com/jimmyrocks/esri-query.git"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   },
   "scripts": {
     "build": "tsc",
     "docs": "npx typedoc --plugin typedoc-plugin-markdown --out docs src/index.ts",
     "start": "node ./dist/index.js",
     "help": "node ./dist/index.js --help",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js -- --t '\\.unit\\.'",
+    "test": "jest",
     "test-full": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js"
   },
   "dependencies": {
@@ -34,22 +34,23 @@
     "command-line-usage": "^7.0.1",
     "long": "^5.2.3",
     "node-fetch": "^3.3.2",
-    "protobufjs": "^7.2.4",
+    "protobufjs": "^7.2.5",
     "sqlite3": "^5.1.6",
-    "ts-node": "^10.9.1",
     "wkx": "^0.5.0"
   },
   "devDependencies": {
-    "@jest/globals": "^29.6.2",
-    "@types/arcgis-rest-api": "^10.4.5",
-    "@types/command-line-args": "^5.2.0",
-    "@types/command-line-usage": "^5.0.2",
-    "@types/sqlite3": "^3.1.8",
-    "@types/terraformer__arcgis": "^2.0.2",
-    "jest": "^29.6.2",
+    "@jest/globals": "^29.7.0",
+    "@types/arcgis-rest-api": "^10.4.8",
+    "@types/command-line-args": "^5.2.3",
+    "@types/command-line-usage": "^5.0.4",
+    "@types/jest": "^29.5.11",
+    "@types/sqlite3": "^3.1.11",
+    "@types/terraformer__arcgis": "^2.0.5",
+    "jest": "^29.7.0",
     "jest-ts-webcompat-resolver": "^1.0.0",
     "ts-jest": "^29.1.1",
-    "typedoc": "^0.24.8",
-    "typedoc-plugin-markdown": "^3.15.4"
+    "ts-node": "^10.9.2",
+    "typedoc": "^0.25.4",
+    "typedoc-plugin-markdown": "^3.17.1"
   }
 }

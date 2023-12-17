@@ -1,6 +1,9 @@
 /* eslint-env node, es6 */
 import { CliOptionsType } from '..';
 import { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
+import { Feature, Geometry } from 'geojson';
+
+type GeometryExceptCollection = Exclude<Geometry, GeoJSON.GeometryCollection>;
 
 export default class Writer {
     options: CliOptionsType;
@@ -26,11 +29,11 @@ export default class Writer {
     }
     save() { }
 
-    writeFeature(line: GeoJSON.Feature) {
+    writeFeature(line: Feature) {
         if (this.status.canWrite) {
             // Add the bbox, if it's requested
-            if (!this.options['no-bbox']) {
-                line.bbox = this.generateBbox(line);
+            if (!this.options['no-bbox'] && line.geometry.type !== 'GeometryCollection'){ 
+                line.bbox = this.generateBbox(line.geometry);
             }
             this.status.records++;
             return line;
@@ -39,29 +42,43 @@ export default class Writer {
         }
     }
 
-    generateBbox = (geojson: GeoJSON.Feature) => {
+    /**
+     * This optimized function generates a bounding box (bbox) in a single pass through
+     * the GeoJSON coordinates, thereby significantly improving performance.
+     *
+     * @param { geometry } GeometryExceptCollection - The GeoJSON geometry object
+     * @returns {[number, number, number, number]} - The minimum and maximum lat, lon values `bbox` in the form [min lon, min lat, max lon, max lat]
+     */
+    generateBbox = (geometry: GeometryExceptCollection): [number, number, number, number] => {
+        // Initialize bbox with extreme values.
+        let bbox: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity];
 
-        let coordList: GeoJSON.Position[] = [];
-        if (geojson.geometry.type === 'Point') coordList = [geojson.geometry.coordinates];
-        if (geojson.geometry.type === 'MultiPoint' || geojson.geometry.type === 'LineString') coordList = [...geojson.geometry.coordinates];
-        if (geojson.geometry.type === 'MultiLineString' || geojson.geometry.type === 'Polygon') coordList = [...geojson.geometry.coordinates.reduce((a, c) => [...a, ...c], [])];
-        if (geojson.geometry.type === 'MultiPolygon') coordList = [...geojson.geometry.coordinates.reduce((a, c) => [...a, ...c], []).reduce((a, c) => [...a, ...c], [])];
+        // Recursive helper function to traverse coordinates.
+        const traverseCoords = (coords: any) => {
+            if (typeof coords[0] === 'number') { // Coords is a Position
+                bbox = [
+                    Math.min(bbox[0], coords[0]),
+                    Math.min(bbox[1], coords[1]),
+                    Math.max(bbox[2], coords[0]),
+                    Math.max(bbox[3], coords[1]),
+                ];
+            } else { // Coords is an array of Positions or deeper
+                coords.forEach(traverseCoords);
+            }
+        };
 
-        const bbox = [
-            Math.min(...coordList.map(pos => pos[0])), //Min lon
-            Math.min(...coordList.map(pos => pos[1])), //Min lat
-            Math.max(...coordList.map(pos => pos[0])), //Max lon
-            Math.max(...coordList.map(pos => pos[1])), //Max lat
-        ];
+        // Start traversal
+        traverseCoords(geometry.coordinates);
 
+        // Update this.status.bbox with either the smaller or larger boundary of the new bbox
         this.status.bbox = [
-            bbox[0] < this.status.bbox[0] ? bbox[0] : this.status.bbox[0],
-            bbox[1] < this.status.bbox[1] ? bbox[1] : this.status.bbox[1],
-            bbox[0] > this.status.bbox[0] ? bbox[0] : this.status.bbox[0],
-            bbox[1] > this.status.bbox[1] ? bbox[1] : this.status.bbox[1]
+            Math.min(bbox[0], this.status.bbox[0]),
+            Math.min(bbox[1], this.status.bbox[1]),
+            Math.max(bbox[2], this.status.bbox[2]),
+            Math.max(bbox[3], this.status.bbox[3])
         ];
 
-        return bbox as [number, number, number, number];
+        return bbox;
     }
 
 };

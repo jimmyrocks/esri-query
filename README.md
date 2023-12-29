@@ -45,7 +45,7 @@ By default, the output is printed to the console in GeoJSON format. You can spec
 | -f, --format string      | [gpkg, geojson, geojsonseq]                                                                         |
 | -o, --output string      | The file to write out (if set, type becomes file)                                                  |
 | -y, --pretty             | Pretty Print JSON (line-delimited will override this)                                              |
-| -f, --feature-count num  | Features per query (Default is server default)                                                     |
+| -c, --feature-count num  | Features per query (Default is server default)                                                     |
 | -j, --json               | Use ESRI json to download data (otherwise it will try to use the esri PBF format)                  |
 | -p, --progress           | Show progress during the process                                                                   |
 | -l, --layer-name         | For GPKG files, specifies the layer-name, if unset, it will use the filename                        |

@@ -1,6 +1,6 @@
 {
   "name": "esri-query",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "exports": "./dist/index.js",
   "type": "module",
   "license": "MIT",
@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc",
     "docs": "npx typedoc --plugin typedoc-plugin-markdown --out docs src/index.ts",
-    "start": "node ./dist/index.js",
+    "start": "npm run build && node ./dist/index.js",
     "help": "node ./dist/index.js --help",
     "test": "jest",
     "test-full": "npm run build && node --experimental-vm-modules node_modules/jest/bin/jest.js"

@@ -1,98 +1,56 @@
 
 import Writer from './Writer.js';
-import { default as sqlite } from 'sqlite3';
-import { EventEmitter } from 'events';
+import Database, { RunResult } from 'better-sqlite3';
 import path from 'path';
 
 import { default as wkx } from 'wkx';
 import { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
 import { CliBaseOptionsType, CliGeoJsonOptionsType, CliSqlOptionsType } from '..';
 
-/**
- * A wrapper class for the `sqlite3` package, providing a simplified API for working with an SQLite database.
- */
-export class SqliteDb {
-  /** The `sqlite3` database object. */
-  db: sqlite.Database;
-  /** The event emitter instance used to emit and listen to events. */
-  events: EventEmitter = new EventEmitter();
-  /** Whether the database has finished loading. */
-  loaded: boolean = false;
+class BatchWriter {
+  db: Database.Database;
+  statements: Map<string, Database.Statement> = new Map();
+  queue: Array<[Database.Statement, Array<string | number> | { [column: string]: string | number }]> = [];
 
-  /**
-   * Creates a new `SqliteDb` instance.
-   * @param filename The filename of the SQLite database to open.
-   */
-  constructor(filename: string) {
-    // Listen for error events on the event emitter and log them to the console
-    this.events.on('error', console.error);
-    // Create a new `sqlite3` database instance and run the `initializeGeoPackageCommands()` to create a GeoPackage database
-    this.db = new sqlite.Database(filename, (e: Error) => {
-      if (e) {
-        this.events.emit('error', e);
-      } else {
-        // TODO check if it's already a geopackage
-        this.runList(initializeGeoPackageCommands()).then(() => {
-          // Mark the database as loaded and emit a "load" event
-          this.loaded = true;
-          this.events.emit('load', this);
-        }).catch(e => this.events.emit('error', e))
-      }
-    })
+  constructor(db: Database.Database, flushInterval?: number | undefined) {
+    this.db = db;
   }
 
-  /**
-   * Runs a list of SQL statements against the database.
-   * @param sql The SQL statements to run, separated by semicolons.
-   * @returns A promise that resolves when all the SQL statements have finished executing.
-   */
-  async runList(sql: string): Promise<void> {
-    // Split the SQL statements by semicolons, filter out any empty statements, and add the semicolon back to each statement
-    const cmds = sql.split(';').filter(v => v.trim().length > 0).map(v => v + ';');
-    // Run each SQL statement in sequence, waiting for each one to finish before running the next one
-    for (const cmd of cmds) {
-      await this.run(cmd);
+  stop() {
+    this.flushQueue();
+    return this.queue.length === 0;
+  }
+
+  queueStatement(sql: string, params: Array<string | number> | { [column: string]: string | number }) {
+    let statement;
+    if (this.statements.has(sql)) {
+      statement = this.statements.get(sql);
+    } else {
+      statement = this.db.prepare(sql);
+      this.statements.set(sql, statement);
     }
-    return;
+    this.queue.push([statement, params]);
   }
 
-  /**
-   * Runs a single SQL statement against the database.
-   * @param sql The SQL statement to run.
-   * @param params Optional parameters to substitute into the SQL statement.
-   * @returns A promise that resolves with the result of the SQL statement.
-   */
-  run(sql: string, params: Array<string | number> = []): Promise<unknown> {
-    return new Promise((res, rej) =>
-      this.db.run(sql, params, (e: Error, r: unknown) =>
-        e ? rej(e) : res(r)
-      ));
-  }
+  flushQueue() {
+    if (this.queue.length === 0) {
+      return;
+    }
 
-  get(sql: string, params: Array<string | number> = []): Promise<Array<{ [key: string]: any }>> {
-    return new Promise((res, rej) =>
-      this.db.all(sql, params, (e: Error, r: Array<{ [key: string]: any }>) =>
-        e ? rej(e) : res(r)
-      ));
-  }
+    // Start a transaction
+    const insertTransaction = this.db.transaction((count) => {
+      for (let i = 0; i < count; i++) {
+        const [statement, params] = this.queue.shift();
+        statement.run(params);
+      }
+    });
 
-  /**
-   * Closes the database connection.
-   * @returns A promise that resolves when the connection has been closed.
-   */
-  close(): Promise<void> {
-    return new Promise((res, rej) =>
-      this.db.close((e: Error) => {
-        // Emit a "close" event when the database has been closed
-        this.events.emit('close', this);
-        e ? rej(e) : res();
-      }));
+    insertTransaction(this.queue.length);
   }
-
 }
 
-export default class Gpkg extends Writer {
-  db?: SqliteDb;
+export default class GpkgInterface extends Writer {
+  db: Database.Database;
   columns: {
     [key: string]: 'NULL' | 'INTEGER' | 'REAL' | 'TEXT' | 'BLOB' | 'GEOMETRY'
   };
@@ -100,102 +58,34 @@ export default class Gpkg extends Writer {
     cmd: string,
     params: Array<string | number>
   }> = [];
-  dbStatus: 'new' | 'idle' | 'running' | 'closed' = 'new';
-  runningCommands: number = 0;
-  closing: boolean = false;
-  buffer: string = '';
-  layerName: string;
   geometryColumnName: string = 'the_geom'; //TODO option
+  batchWriter: BatchWriter;
   declare options: CliBaseOptionsType & CliSqlOptionsType;
 
-  constructor(options: CliBaseOptionsType & (CliSqlOptionsType | CliGeoJsonOptionsType), sourceInfo: EsriFeatureLayerType) {
+  constructor(options: CliBaseOptionsType & (CliSqlOptionsType | CliGeoJsonOptionsType), sourceInfo: EsriFeatureLayerType & { totalFeatureCount?: number }) {
     super(options, sourceInfo);
     if (!this.options.output) throw new Error('Output filename required for GPKG format.');
     if (!this.options['layer-name']) {
+      // If no layer-name comes in, pull it from the filename
       this.options['layer-name'] = path.basename(this.options.output, path.extname(this.options.output));
     }
     this.setSourceInfo(sourceInfo);
+
+    // Create the database
+    this.db = GpkgInterface.createGpkg(options.output);
+    this.addLayer(this.options['layer-name'], this.columns);
+    this.batchWriter = new BatchWriter(this.db);
   }
 
-  open() {
-    let createTableStatement = '';
-    this.layerName = this.options['layer-name'];
-
-    //GPKG setup
-    const gpkgContent = `INSERT INTO "gpkg_contents" (
-      table_name,
-      data_type,
-      identifier,
-      description,
-      min_x,
-      min_y,
-      max_x,
-      max_y,
-      srs_id
-    ) VALUES (?,?,?,?,?,?,?,?,?);`;
-    const gpkgParams = [this.options['layer-name'], 'features', this.sourceInfo.name, this.sourceInfo.description, -180, -90, 180, 90, '4326'];
-    const geometryTypeLookup = {
-      esriGeometryPoint: 'POINT',
-      esriGeometryMultipoint: 'MULTIPOINT',
-      esriGeometryPolyline: 'MULTILINESTRING',
-      esriGeometryPolygon: 'MULTIPOLYGON',
-      esriGeometryEnvelope: 'GEOMETRY'
-    };
-
-    const gpkgOgrContents = `INSERT INTO "gpkg_ogr_contents" (
-      table_name,
-      feature_count
-      ) VALUES (?,?)
-      `;
-    const gpkgOgrParams = [this.options['layer-name'], this.status.records];
-
-
-    // Create the table for the new dataset
-    const createColumns = Object.keys(this.columns)
-      .map(name => '"' + name + '" ' + this.columns[name])
-      .join(', ');
-
-    createTableStatement = 'CREATE TABLE "' + this.layerName + '" (' + createColumns + ', "' + this.geometryColumnName + '" GEOMETRY) ';
-
-    this.addCommand(createTableStatement);
-    this.addCommand(gpkgContent, gpkgParams);
-    this.addCommand(gpkgOgrContents, gpkgOgrParams);
-
-    // Set up the geometry columns
-    this.addCommand('INSERT INTO "gpkg_geometry_columns" (table_name, column_name, geometry_type_name, srs_id, z, m) VALUES (?,?,?,?,?,?);', [
-      this.options['layer-name'], this.geometryColumnName, geometryTypeLookup[this.sourceInfo.geometryType], 4326, 0, 0
-    ])
-
-    // Add the style in
-    this.addCommand('INSERT INTO "layer_styles" (id, useAsDefault, f_table_name, f_geometry_column, styleName, description, styleESRI, styleMapBox) VALUES (1,1,?,?,?,?,?,?);', [
-      this.options['layer-name'], this.geometryColumnName, this.sourceInfo.name, this.sourceInfo.description, JSON.stringify(this.sourceInfo.drawingInfo), null
-    ]);
-
-    this.addCommand('BEGIN TRANSACTION');
-
-    this.db = new SqliteDb(this.options.output);
-    this.db.events.on('load', () => this.runBacklog());
-    this.status.canWrite = true;
-  };
-
-  close() {
-    this.addCommand('COMMIT');
-    if (!this.options['no-bbox']) {
-      // If the bbox was requested, update it
-      this.addCommand(
-        `UPDATE "gpkg_contents" SET min_x = ?, min_y = ?, max_x = ?, max_y = ? WHERE "table_name" = ?;`,
-        [...this.status.bbox, this.options['layer-name']]
-      );
-    }
-    // Write out the ogr contents
-    this.addCommand(
-      `UPDATE "gpkg_ogr_contents" SET feature_count = ? WHERE "table_name" = ?;`,
-      [this.status.records, this.options['layer-name']]
-    );
-    this.closing = true;
-    this.runBacklog();
-    this.status.canWrite = false;
-  };
+  static createGpkg(outputFilename: string): Database.Database {
+    const db = new Database(outputFilename);
+    db.pragma('journal_mode = WAL');
+    const cmds = initializeGeoPackageCommands.split(';').filter(v => v.trim().length > 0).map(v => v + ';');
+    db.transaction((cmds: string[]) =>
+      cmds.map(cmd => db.prepare(cmd).run())
+    )(cmds);
+    return db;
+  }
 
   writeFeature(feature: GeoJSON.Feature) {
     const geojson = super.writeFeature(feature);
@@ -206,14 +96,15 @@ export default class Gpkg extends Writer {
     const insertValues: Array<typeof geojson.properties.feature[0]> = [];
     const insertColumns: Array<string> = [];
 
-    Object.keys(properties).map(property => {
+    Object.entries(properties).map(([column, value]) => {
       // Add an extra column if one comes up (it shouldn't)
-      if (!this.columns[property]) {
-        this.columns[property] = 'TEXT';
-        this.addCommand('ALTER TABLE "' + this.layerName + '" ADD "' + property + '" ' + this.columns[property]);
+      // TODO Gpkg should have a add column function
+      if (!this.columns[column]) {
+        this.columns[column] = 'TEXT';
+        this.addColumn(this.options['layer-name'], column, this.columns[column]);
       }
-      insertColumns.push(property);
-      insertValues.push(properties[property]);
+      insertColumns.push(column);
+      insertValues.push(value);
     });
 
     // Add the geometry
@@ -221,20 +112,23 @@ export default class Gpkg extends Writer {
     insertValues.push(geometry);
 
     // Add the values and the parameters
-    let insertStatement = 'INSERT INTO "' + this.layerName + '" ("' + insertColumns.join('", "') + '") VALUES (';
-    insertStatement += insertValues.map(() => '?').join(',');
-    insertStatement += ')';
+    let insertStatement = `
+      INSERT INTO "${this.options['layer-name']}" ("${insertColumns.join('", "')}")
+      VALUES (${insertValues.map(() => '?').join(',')})`;
 
-    this.addCommand(insertStatement, insertValues);
-    this.runBacklog();
+    this.batchWriter.queueStatement(insertStatement, insertValues);
     return geojson;
   };
 
-  save() {
-    this.addCommand('COMMIT');
-    this.addCommand('BEGIN TRANSACTION');
-    this.runBacklog();
-  };
+  save(): void {
+    this.batchWriter.flushQueue();
+  }
+
+  close(): void {
+    this.batchWriter.stop();
+    this.db.close();
+    return super.close();
+  }
 
   setSourceInfo(sourceInfo: EsriFeatureLayerType) {
     // Convert these fields to columns
@@ -255,7 +149,7 @@ export default class Gpkg extends Writer {
       esriFieldTypeXML: 'TEXT'
     }
 
-    this.columns = this.sourceInfo.fields
+    this.columns = sourceInfo.fields
       .filter(field => field.type !== 'esriFieldTypeGeometry') // Filter out the geometry field
       .map(field => (
         {
@@ -265,33 +159,94 @@ export default class Gpkg extends Writer {
       )).reduce((a, c) => ({ ...a, ...{ [c.name]: c.type } }), {});
   };
 
-  addCommand(cmd: string, params?: Array<string | number>) {
-    this._commandBacklog.push({
-      'cmd': cmd,
-      'params': params || []
-    });
+  addColumn(layerName: string, columnName: string, columnType: 'NULL' | 'INTEGER' | 'REAL' | 'TEXT' | 'BLOB' | 'GEOMETRY'): RunResult {
+    return this.db.prepare(`ALTER TABLE "${layerName}" ADD "${columnName}" ${columnType}`).run();
   };
 
+  addLayer(layerName: string, columns: { [key: string]: 'NULL' | 'INTEGER' | 'REAL' | 'TEXT' | 'BLOB' | 'GEOMETRY' }): RunResult[] {
+    const { name: sourceName, description: sourceDescription, geometryType, totalFeatureCount, drawingInfo } = this.sourceInfo;
+    const srid = 4326;
+    const geometryColumnName = 'the_geom';
+    const sourceDrawingInfo = drawingInfo ? JSON.stringify(drawingInfo) : '{}';
 
-  async runBacklog() {
-    if (this.runningCommands === 0 && this._commandBacklog.length > 0) {
-      const thisCommand = this._commandBacklog.shift();
+    const commands: Array<{ cmd: string, params: Array<string | number> | { [key: string]: string | number } }> = [];
 
-      this.runningCommands++;
-      this.dbStatus = 'running';
-      try {
-        await this.db.run(thisCommand.cmd, thisCommand.params);
-      } catch (e) {
-        console.error('SQLITE ERROR', e);
+    //GPKG Layer Statement
+    const gpkgContents = {
+      cmd: `INSERT INTO "gpkg_contents" (
+        table_name,
+        data_type,
+        identifier,
+        description,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        srs_id
+      ) VALUES (@tableName, @dataType, @identifier, @description, @minX, @minY, @maxX, @maxY, @srsId);`,
+      params: {
+        tableName: layerName,
+        dataType: 'features',
+        identifier: sourceName,
+        description: sourceDescription,
+        minX: -180,
+        minY: -90,
+        maxX: 180,
+        maxY: 90,
+        srsId: srid.toString()
       }
-      this.runningCommands--;
-      this.dbStatus = 'idle';
-      this.runBacklog();
-    } else if (this.runningCommands === 0 && this.closing) {
-      await this.db.close();
-      this.dbStatus = 'closed';
-    }
-  };
+    };
+    commands.push(gpkgContents);
+
+    const gpkgOgrContents = {
+      cmd: `INSERT INTO "gpkg_ogr_contents" (
+        table_name,
+        feature_count
+        ) VALUES (@tableName, @totalFeatureCount);
+        `,
+      params: { tableName: layerName, totalFeatureCount }
+    };
+    commands.push(gpkgOgrContents);
+
+    // Create the table for the new dataset
+    const createColumns = Object.entries({ ...columns, [geometryColumnName]: 'GEOMETRY' })
+      .map(([name, type]) => '"' + name + '" ' + type)
+      .join(', ');
+    const createDatasetTable = { 'cmd': `CREATE TABLE "${layerName}" (${createColumns})`, params: {} };
+    commands.push(createDatasetTable);
+
+    // Set up the geometry columns // TODO elsewhere
+    const geometryTypeLookup = {
+      esriGeometryPoint: 'POINT',
+      esriGeometryMultipoint: 'MULTIPOINT',
+      esriGeometryPolyline: 'MULTILINESTRING',
+      esriGeometryPolygon: 'MULTIPOLYGON',
+      esriGeometryEnvelope: 'GEOMETRY'
+    };
+    const gpkgGeometryColumns = {
+      cmd: 'INSERT INTO "gpkg_geometry_columns" (table_name, column_name, geometry_type_name, srs_id, z, m) VALUES (?,?,?,?,?,?);',
+      params: [layerName, geometryColumnName, geometryTypeLookup[geometryType], srid, 0, 0
+      ]
+    };
+    commands.push(gpkgGeometryColumns);
+
+    // Add the style in
+    const layerStyles = {
+      cmd: 'INSERT INTO "layer_styles" (id, useAsDefault, f_table_name, f_geometry_column, styleName, description, styleESRI, styleMapBox) VALUES (1,1,?,?,?,?,?,?);',
+      params: [
+        layerName, geometryColumnName, sourceName, sourceDescription, sourceDrawingInfo, null
+      ]
+    };
+    commands.push(layerStyles);
+
+    const transaction = this.db.transaction(() => {
+      return commands.map(({ cmd, params }) =>
+        this.db.prepare(cmd).run(params)
+      );
+    });
+
+    return transaction();
+  }
 
   /**
   *  Converts a GeoJSON feature into a GeoPackage binary format buffer.
@@ -315,40 +270,46 @@ export default class Gpkg extends Writer {
      *   WKBGeometry geometry; // 
      * }
      */
-    const generateBuffer = (size: number, cmd: (buffer: Buffer) => void) => {
-      // Runs commands on a buffer and returns that buffer
-      const b = Buffer.alloc(size);
-      cmd(b);
-      return b;
-    };
 
     // Create the well known binary version of the GeoJSON Feature Geometry
-    const geom = wkx.Geometry.parseGeoJSON(feature.geometry);
+    let geom: wkx.Geometry;
+    try {
+      geom = wkx.Geometry.parseGeoJSON(feature.geometry);
+    } catch (e) {
+      console.error('Error parsing geometry, using null geometry');
+      return Buffer.alloc(0);
+    }
 
     // Create the standard Geo Package Binary
+
+    // Header Buffer
+    /////////////////////////////////////////
+    const headerBuffer = Buffer.alloc(8);
+    headerBuffer.writeUInt16BE(0x4750, 0); //'GP' in ASCII
+    headerBuffer.writeUInt8(0, 2);
+
+    // Generate the flags
+    let flags = 0;
+    flags |= 1; // Use little endian, since WKX outputs LE and the spec says it should be consistent
+    if (feature.bbox) flags |= 0b10; // 1: envelope is [minx, maxx, miny, maxy], 32 bytes
+    headerBuffer.writeUInt8(flags, 3); // write the flags 
+
+    // Write out the EPSG (Always 4326 (TODO allow others?))
+    headerBuffer.writeUInt32LE(4326, 4);
+
+    // Header Buffer
+    /////////////////////////////////////////
+    const envelopeBuffer = feature.bbox ? Buffer.alloc(32) : Buffer.alloc(0);
+    if (feature.bbox) {
+      envelopeBuffer.writeDoubleLE(feature.bbox[0], 0); // minx
+      envelopeBuffer.writeDoubleLE(feature.bbox[2], 8); // maxx
+      envelopeBuffer.writeDoubleLE(feature.bbox[1], 16); // miny
+      envelopeBuffer.writeDoubleLE(feature.bbox[3], 24); // maxy
+    }
+
     const standardGeoPackageBinary = [
-      generateBuffer(8, b => {
-        b.write('GP');
-        b.writeUInt8(0, 2);
-
-        // Generate the flags
-        let flags = 0;
-        flags += 1; // Use little endian, since WKX outputs LE and the spec says it should be consistent
-        if (feature.bbox) flags += 1 << 1; // 1: envelope is [minx, maxx, miny, maxy], 32 bytes
-        b.writeUInt8(flags, 3); // write the flags 
-
-        // Write out the EPSG (Always 4326 (TODO allow others?))
-        b.writeUInt32LE(4326, 4);
-      }),
-      generateBuffer(feature.bbox ? 32 : 0, b => {
-        // TODO Is this useful? We could generate a bbox from the GeoJSON as well
-        if (feature.bbox) {
-          b.writeDoubleLE(feature.bbox[0], 0); // minx
-          b.writeDoubleLE(feature.bbox[2], 8); // maxx
-          b.writeDoubleLE(feature.bbox[1], 16); // miny
-          b.writeDoubleLE(feature.bbox[3], 24); // maxy
-        }
-      }), // see envelope contents indicator code below, with the endianness specified by the byte order flag // send nothing
+      headerBuffer,
+      envelopeBuffer,
       geom.toWkb()
     ];
 
@@ -361,11 +322,10 @@ export default class Gpkg extends Writer {
 
 // I added some fields to the layer_styles, they _may_ cause issues
 // https://gis.stackexchange.com/questions/341720/write-layer-style-qml-as-predefined-within-a-gpkg-using-r
-const initializeGeoPackageCommands = () => `
+const initializeGeoPackageCommands = `
     PRAGMA foreign_keys = OFF;
     PRAGMA application_id = 1196444487;
     PRAGMA user_version = 10200;
-    BEGIN TRANSACTION;
     CREATE TABLE gpkg_spatial_ref_sys(srs_name TEXT NOT NULL, srs_id INTEGER NOT NULL PRIMARY KEY, organization TEXT NOT NULL, organization_coordsys_id INTEGER NOT NULL, definition  TEXT NOT NULL, description TEXT);
     CREATE TABLE gpkg_ogr_contents (table_name text, feature_count int);
     INSERT INTO gpkg_spatial_ref_sys VALUES('Undefined cartesian SRS', -1, 'NONE', -1, 'undefined', 'undefined cartesian coordinate reference system');
@@ -406,5 +366,4 @@ const initializeGeoPackageCommands = () => `
       ui TEXT(30),
       update_time DATETIME NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
-    COMMIT;
 `;

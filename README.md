@@ -100,8 +100,6 @@ To test `esri-query`, run the following command in your terminal:
 npm run test
 ```
 
-Sure! Here's the updated "More Info" section with relevant links:
-
 ## Formats
 
 ### Input

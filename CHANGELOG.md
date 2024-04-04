@@ -1,5 +1,8 @@
 # esri-query: 
 
+### version: 1.2.1
+* include new documentation
+
 ### version: 1.2.0
 * Replace sqlite3 with better-sqlite3 and remove a lot of the unneeded async cpde
 * Update packages

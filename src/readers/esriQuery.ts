@@ -10,6 +10,8 @@ import Gpkg from '../writers/Gpkg.js';
 import File from '../writers/File.js';
 import Writer from '../writers/Writer.js';
 
+const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
+
 type EsriFeatureType = {
   'geometry'?: ArcGIS.Geometry,
   'attributes'?: { [key: string]: string }
@@ -154,7 +156,7 @@ export default class EsriQuery {
     }
 
     // Create the writer instance and start the queries
-    this.writer = new writerType(this.options, this.sourceInfo);
+    this.writer = new writerType(this.options, { ...this.sourceInfo, totalFeatureCount: this.totalFeatureCount });
 
     this.nextQuery(0, false); // Start the queries (at offset 0)
     this.runtimeParams.status = 'running';
@@ -192,7 +194,6 @@ export default class EsriQuery {
 
         // Successfully parsed the geometry!
         if (geometry) {
-
           // Create a GeoJSON feature
           const geojson = {
             type: "Feature",
@@ -278,32 +279,32 @@ export default class EsriQuery {
       }
 
     } catch (e) {
-      console.error('Error with request: ', newQueryObj);
-      console.error(e.status, e.code, e);
-
       // If the connection was reset, we can just try again
-      if (e.code === 'ECONNRESET') {
+      // TODO range error is a hack detect a broken PBF, these are probably error messages from the server, but they are hard to reproduce
+      if (e.code === 'ECONNRESET' || e.message === 'index out of range: 3 + 101 > 80') {
         this.nextQuery(newQueryObj.resultOffset, true);
-        return null;
       } else if (e.status === 502 || e.status === 504) {
         // If we're getting a 502 (Bad Gateway) or a 504(Gateway Timeout) error from the server
         // that (probably) means that the server is too busy for our request
         // So increment the amount of errors and wait for the server to free up
         this.runtimeParams.errorCount = this.runtimeParams.errorCount <= 0 ? 0 : this.runtimeParams.errorCount;
         this.runtimeParams.errorCount++;
-        if (this.runtimeParams.errorCount > 10) {
+        if (this.runtimeParams.errorCount > MAX_ALLOWED_ERRORS) {
           console.error('Too many errors');
           console.error(e.status, e.code);
           throw new Error(e);
         }
 
+        const that = this; // This gets around the fact that setTimeout changes the context
         setTimeout(function () {
-          this.nextQuery(newQueryObj.resultOffset, true);
+          that.nextQuery(newQueryObj.resultOffset, true);
           return null;
         }, 1500 * this.runtimeParams.errorCount);
 
       } else {
         // There was some other error
+        console.error('Error with request: ', newQueryObj);
+        console.error(e.status, e.code, e);
         console.error('Process ending with error', e);
         if (e instanceof Error) {
           throw e;
@@ -332,7 +333,7 @@ export default class EsriQuery {
       });
     } else {
       // Split the request in half
-      console.error('splitting');
+      process.stderr.write('[split]');
       newQueries.push({
         'min': offset,
         'max': offset + Math.floor(featureCount / 2),

@@ -7,7 +7,7 @@ type GeometryExceptCollection = Exclude<Geometry, GeoJSON.GeometryCollection>;
 
 export default class Writer {
     options: CliOptionsType;
-    sourceInfo: EsriFeatureLayerType;
+    sourceInfo: EsriFeatureLayerType & { totalFeatureCount?: number };
     status = {
         canWrite: false,
         records: 0,
@@ -16,7 +16,7 @@ export default class Writer {
     strings: { [key: string]: string }
 
 
-    constructor(options: CliOptionsType, sourceInfo?: EsriFeatureLayerType) {
+    constructor(options: CliOptionsType, sourceInfo?: EsriFeatureLayerType & { totalFeatureCount?: number }) {
         this.options = options;
         this.sourceInfo = sourceInfo;
     }
@@ -32,7 +32,7 @@ export default class Writer {
     writeFeature(line: Feature) {
         if (this.status.canWrite) {
             // Add the bbox, if it's requested
-            if (!this.options['no-bbox'] && line.geometry.type !== 'GeometryCollection'){ 
+            if (!this.options['no-bbox'] && line.geometry.type && line.geometry.type !== 'GeometryCollection') {
                 line.bbox = this.generateBbox(line.geometry);
             }
             this.status.records++;
@@ -68,7 +68,11 @@ export default class Writer {
         };
 
         // Start traversal
-        traverseCoords(geometry.coordinates);
+        try {
+            traverseCoords(geometry.coordinates);
+        } catch (e) {
+            throw new Error('Invalid GeoJSON geometry!');
+        }
 
         // Update this.status.bbox with either the smaller or larger boundary of the new bbox
         this.status.bbox = [

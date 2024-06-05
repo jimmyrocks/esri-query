@@ -2,7 +2,6 @@ import File from './File';
 import { describe, expect, test } from '@jest/globals';
 import { readFileSync, unlinkSync } from 'fs';
 
-
 describe('File', () => {
     const outputFile = 'File.unit.test.output.log';
 

@@ -1,4 +1,3 @@
-/* eslint-env node, es6 */
 import { CliOptionsType } from '..';
 import { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
 import { Feature, Geometry } from 'geojson';

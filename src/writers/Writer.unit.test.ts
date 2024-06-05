@@ -1,9 +1,6 @@
 import Writer from './Writer'; // Update the path accordingly
 import { Geometry, Feature } from "geojson";
 
-type GeometryExceptCollection = Exclude<Geometry, GeoJSON.GeometryCollection>;
-
-
 describe('Writer', () => {
     let writer: Writer;
 

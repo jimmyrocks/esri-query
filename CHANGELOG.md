@@ -1,5 +1,15 @@
 # esri-query: 
 
+### version 1.2.2
+* Code cleanup
+* Update packages
+  * better-sqlite3              9.4.5  →    11.0.0
+  * protobufjs                 ^7.2.6  →    ^7.3.0
+  * @types/better-sqlite3      ^7.6.9  →   ^7.6.10
+  * ts-jest                   ^29.1.2  →   ^29.1.4
+  * typedoc                  ^0.25.12  →  ^0.25.13
+  * typedoc-plugin-markdown   ^3.17.1  →    ^4.0.3
+
 ### version: 1.2.1
 * include new documentation
 

@@ -1,6 +1,6 @@
 {
   "name": "esri-query",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "exports": "./dist/index.js",
   "type": "module",
   "license": "MIT",
@@ -30,18 +30,18 @@
   },
   "dependencies": {
     "@terraformer/arcgis": "^2.1.2",
-    "better-sqlite3": "9.4.5",
+    "better-sqlite3": "11.0.0",
     "command-line-args": "^5.2.1",
     "command-line-usage": "^7.0.1",
     "long": "^5.2.3",
     "node-fetch": "^3.3.2",
-    "protobufjs": "^7.2.6",
+    "protobufjs": "^7.3.0",
     "wkx": "^0.5.0"
   },
   "devDependencies": {
     "@jest/globals": "^29.7.0",
     "@types/arcgis-rest-api": "^10.4.8",
-    "@types/better-sqlite3": "^7.6.9",
+    "@types/better-sqlite3": "^7.6.10",
     "@types/command-line-args": "^5.2.3",
     "@types/command-line-usage": "^5.0.4",
     "@types/jest": "^29.5.12",
@@ -49,9 +49,9 @@
     "@types/terraformer__arcgis": "^2.0.5",
     "jest": "^29.7.0",
     "jest-ts-webcompat-resolver": "^1.0.0",
-    "ts-jest": "^29.1.2",
+    "ts-jest": "^29.1.4",
     "ts-node": "^10.9.2",
-    "typedoc": "^0.25.12",
-    "typedoc-plugin-markdown": "^3.17.1"
+    "typedoc": "^0.25.13",
+    "typedoc-plugin-markdown": "^4.0.3"
   }
 }

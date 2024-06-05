@@ -1,4 +1,3 @@
-/* eslint-env node, es6 */
 import { openSync, closeSync, writeSync } from 'fs';
 import Stdout from './Stdout.js';
 
@@ -40,4 +39,3 @@ export default class File extends Stdout {
     };
 
 };
-

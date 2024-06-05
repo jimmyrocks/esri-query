@@ -1,8 +1,8 @@
-import * as ArcGIS from 'arcgis-rest-api';
+import { Geometry } from 'arcgis-rest-api';
 import { Long as LongType } from 'protobufjs';
 
 export type ArcGISFeatureType = {
-    geometry: ArcGIS.Geometry,
+    geometry: Geometry,
     attributes: { [key: string]: string | number | boolean }
 };
 

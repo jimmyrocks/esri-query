@@ -2,10 +2,9 @@ import { describe, expect, test } from '@jest/globals';
 import { deZigZag, longToString, messageToJson } from './esri-pbf';
 import { default as Long } from 'long';
 import { Long as LongType } from 'protobufjs';
-import { ArcGISFeatureType, ArcGISJsonRestType, FeatureCollectionType, FeatureType, FieldTypeEnum, GeometryTypeEnum } from './esri-pbf-types';
+import { ArcGISJsonRestType, FeatureCollectionType, FieldTypeEnum, GeometryTypeEnum } from './esri-pbf-types';
 import { Geometry } from 'arcgis-rest-api';
 import { Writable } from 'stream';
-
 
 // Pass stderr to a write stream instead of stderr
 const writeStream: Writable = new Writable;

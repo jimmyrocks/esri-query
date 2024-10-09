@@ -44,8 +44,7 @@ export default class Writer {
     /**
      * This optimized function generates a bounding box (bbox) in a single pass through
      * the GeoJSON coordinates, thereby significantly improving performance.
-     *
-     * @param { geometry } GeometryExceptCollection - The GeoJSON geometry object
+     * @param {geometry} GeometryExceptCollection - The GeoJSON geometry object
      * @returns {[number, number, number, number]} - The minimum and maximum lat, lon values `bbox` in the form [min lon, min lat, max lon, max lat]
      */
     generateBbox = (geometry: GeometryExceptCollection): [number, number, number, number] => {

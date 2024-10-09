@@ -18,7 +18,7 @@ export type CliBaseOptionsType = {
 };
 
 export type CliGeoJsonOptionsType = {
-  format: 'geojson' | 'geojsonseq',
+  format: 'geojson' | 'geojsonseq' | 'esrijson',
   pretty: boolean,
 };
 

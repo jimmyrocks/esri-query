@@ -22,6 +22,7 @@ describe('longToString', () => {
     });
 
     test('should return the input value for non-Long input', () => {
+        console.log('42?', longToString(42), typeof longToString(42));
         expect(longToString(42)).toEqual(42);
         expect(longToString('hello')).toEqual('hello');
     });

@@ -1,5 +1,21 @@
 # esri-query: 
 
+### version 1.3.0
+* Add geographic queries
+* Allow Garbage Collector for very large queries
+* Code cleanup
+* Update packages
+  * better-sqlite3             11.0.0  →   11.3.0    
+  * command-line-args          ^5.2.1  →   ^6.0.0     
+  * command-line-usage         ^7.0.1  →   ^7.0.3     
+  * protobufjs                 ^7.3.0  →   ^7.4.0     
+  * @types/better-sqlite3     ^7.6.10  →  ^7.6.11     
+  * ts-jest                   ^29.1.4  →  ^29.2.5     
+  * typedoc                  ^0.25.13  →  ^0.26.8   
+  * typedoc-plugin-markdown    ^4.0.3  →   ^4.2.9
+  * protobufjs                 ^7.3.2  →    ^7.4.0     
+  * @types/jest              ^29.5.12  →  ^29.5.13     
+
 ### version 1.2.2
 * Code cleanup
 * Update packages

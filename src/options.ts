@@ -30,7 +30,7 @@ const optionDefinitions: OptionDefinition[] = [
         name: 'format',
         alias: 'f',
         type: String,
-        description: '[gpkg, geojson, geojsonseq]',
+        description: '[gpkg, geojson, geojsonseq, esrijson]',
         group: 'base'
     },
     {
@@ -48,14 +48,14 @@ const optionDefinitions: OptionDefinition[] = [
         defaultValue: false,
         group: 'geojson'
     },
-    /*{
-      name: 'method',
-      alias: 'm',
-      type: String,
-      description: 'Pagination method: Either geographic or default',
-      defaultValue: 'default',
-      group: 'base'
-    },*/
+    {
+        name: 'method',
+        alias: 'm',
+        type: String,
+        description: 'Pagination method: Either geographic or default',
+        defaultValue: 'default',
+        group: 'base'
+    },
     {
         name: 'feature-count',
         alias: 'c',

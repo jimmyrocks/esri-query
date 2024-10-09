@@ -24,6 +24,8 @@ export default class Stdout extends Writer {
     if (this.options.format === 'geojsonseq') {
       this.strings.header = this.strings.footer = this.strings.bboxFooter = null;
       this.strings.delimiter = '\n';
+    } else if (this.options.format === 'esrijson') {
+      this.strings.header = null;
     }
     if (!this.headerStatus.hasHeader) {
       this.writeHeader();

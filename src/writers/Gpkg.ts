@@ -132,21 +132,21 @@ export default class GpkgInterface extends Writer {
   setSourceInfo(sourceInfo: EsriFeatureLayerType) {
     // Convert these fields to columns
     // 'NULL' | 'INTEGER' | 'REAL' | 'TEXT' | 'BLOB'
-    const typesToSqlite = {
-      esriFieldTypeInteger: 'INTEGER',
-      esriFieldTypeSmallInteger: 'INTEGER',
-      esriFieldTypeDouble: 'REAL',
-      esriFieldTypeSingle: 'REAL',
-      esriFieldTypeString: 'TEXT',
-      esriFieldTypeDate: 'TEXT',
-      esriFieldTypeGeometry: 'TEXT',
-      esriFieldTypeOID: 'TEXT',
-      esriFieldTypeBlob: 'BLOB',
-      esriFieldTypeGlobalID: 'TEXT',
-      esriFieldTypeRaster: 'TEXT',
-      esriFieldTypeGUID: 'TEXT',
-      esriFieldTypeXML: 'TEXT'
-    }
+      const typesToSqlite = {
+        esriFieldTypeInteger: 'INTEGER',
+        esriFieldTypeSmallInteger: 'INTEGER',
+        esriFieldTypeDouble: 'REAL',
+        esriFieldTypeSingle: 'REAL',
+        esriFieldTypeString: 'TEXT',
+        esriFieldTypeDate: 'TEXT',
+        esriFieldTypeGeometry: 'TEXT',
+        esriFieldTypeOID: 'TEXT',
+        esriFieldTypeBlob: 'BLOB',
+        esriFieldTypeGlobalID: 'TEXT',
+        esriFieldTypeRaster: 'TEXT',
+        esriFieldTypeGUID: 'TEXT',
+        esriFieldTypeXML: 'TEXT'
+      }
 
     this.columns = sourceInfo.fields
       .filter(field => field.type !== 'esriFieldTypeGeometry') // Filter out the geometry field

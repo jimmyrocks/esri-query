@@ -24,7 +24,7 @@ const toStringObj = (obj: { [key: string]: string | number | boolean }) =>
  * @param query The esri query object that will be sent in the request body.
  * @returns The response to the request, either as a JSON object or a protobuf message based on the format specified in the query param.
  */
-export default async function postAsync(url: string, query: EsriQueryObjectType): Promise<unknown> {
+export default async function postAsync(url: string | URL, query: EsriQueryObjectType): Promise<unknown> {
   // Extract the response format from the esri query object.
   const format = query.f;
 

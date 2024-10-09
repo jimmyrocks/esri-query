@@ -1,18 +1,20 @@
-import protobuf, { Long as LongType } from 'protobufjs';
-import { default as Long } from 'long';
+import protobuf from 'protobufjs';
+import type { Long as LongType, Root } from 'protobufjs';
+import Long from 'long';
 import { ArcGISFeatureType, ArcGISJsonRestType, FeatureCollectionType, GeometryTypeEnum } from './esri-pbf-types.js';
 
-/**
- * Takes an array of LongType values, splits them up into arrays of length `splits`.
- * Returns an array of arrays of number values that have been transformed to undo zigzag encoding.
- * 
- * @param values An array of LongType values representing a polyline or polygon
- * @param splits An array of integers representing the number of values in each part of the polyline or polygon
- * @param scale The scale factor used to convert the LongType values to number values
- * @param initialOffset The initial offset used to convert the LongType values to number values
- * @param upperLeftOrigin A boolean indicating whether the origin is in the upper left (true) or lower left (false)
- * @returns An array of arrays of number values representing the unzizagged polyline or polygon
- */
+// Cache for protobuf loaders
+let protoLoader: Root | undefined = undefined;
+
+// Function to clear large objects from memory
+export function clearLargeObjects() {
+  if (global.gc) {
+    global.gc();
+  } else {
+    //console.warn('Garbage collection is not exposed. Run node with --expose-gc flag.');
+  }
+}
+
 const deZigZag = (
   values: Array<LongType>,
   splits: Array<number>,
@@ -20,126 +22,94 @@ const deZigZag = (
   initialOffset: number,
   upperLeftOrigin: boolean
 ): number[][] => {
-  // Function to process each polyline or polygon part
-  const processPart = (split: number, i: number) => {
-    // Initialize the previous value to the initial offset
-    let previousValue: Long = Long.fromNumber(initialOffset / scale);
+  const sign = upperLeftOrigin ? -1 : 1;
+  const scaledInitialOffset = Long.fromNumber(initialOffset / scale);
+  let valueIndex = 0;
+  const result: number[][] = [];
 
-    // Function to process each value in the current part
-    const processValue = (_: undefined, j: number) => {
-      // Calculate the offset for the current value
-      const valueOffset = splits.reduce(
-        (accumulator, splitValue, index) =>
-          accumulator + (index < i ? splitValue : 0),
-        0
-      );
+  for (let i = 0; i < splits.length; i++) {
+    const split = splits[i];
+    const part: number[] = new Array(split);
+    let previousValue = scaledInitialOffset;
 
-      // Get the current value and convert it to the Long type
-      const value = values[valueOffset + j];
-      const longValue = new Long(value.low, value.high, value.unsigned);
-
-      // Calculate the sign based on the origin position
-      const sign = upperLeftOrigin ? -1 : 1;
-
-      // Apply the zigzag decoding and update the previous value
-      const decodedValue: Long = longValue.multiply(sign).add(previousValue);
+    for (let j = 0; j < split; j++) {
+      const value = values[valueIndex++];
+      // Convert LongType to Long if necessary
+      const longValue = Long.isLong(value) ? value : new Long(value.low, value.high, value.unsigned);
+      const decodedValue = longValue.mul(sign).add(previousValue);
       previousValue = decodedValue;
+      part[j] = decodedValue.toNumber() * scale;
+    }
 
-      // Convert the value to a number and scale it
-      return decodedValue.toNumber() * scale;
-    };
-
-    // Process each value in the current part
-    return new Array(split).fill(undefined).map(processValue);
-  };
-
-  // Process each part of the polyline or polygon
-  return splits.map(processPart);
-};
-
-/**
-* Converts a Long, number, or string value to a string.
-* @param value - The value to convert.
-* @returns The converted string value, or null if the input value is undefined.
-*/
-const longToString = (value: (Long | number | string)) => {
-  if (value === undefined) {
-    return null;
-  } else if (typeof value === 'object') {
-    return value.toString();
-  } else {
-    return value;
+    result.push(part);
   }
+
+  return result;
 };
 
-/**
- * Convert a FeatureCollectionType PBF message to an ArcGISJsonRestType object
- * ArcGISJsonRestType Objects can then be converted with Terraformer
- *
- * @param message The FeatureCollectionType message to convert
- * @returns An ArcGISJsonRestType object
- */
+const longToString = (value: LongType | number | string | undefined): string | number | null => {
+  if (value == null) return null;
+  return (typeof value === 'object') ? value.toString() : value;
+};
+
 const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
-  // If no query result, log error message and return empty features and fields
-  if (message.queryResult === null) {
+  if (!message.queryResult) {
     console.error('No results in PBF');
-    return {
-      features: [],
-      fields: [],
-      exceededTransferLimit: false
-    };
+    return { features: [], fields: [], exceededTransferLimit: false };
   }
 
-  const { featureResult } = message.queryResult;
-  const { transform, geometryType } = featureResult;
-  const features = featureResult.features.map(feature => {
+  let { featureResult } = message.queryResult;
+  const { transform, geometryType, fields } = featureResult;
+  const fieldNames = fields.map(field => field.name);
 
-    // Parse the Attributes of the feature
-    const attributes = feature.attributes
-      .map((attribute, idx) => ({
-        key: featureResult.fields[idx].name,
-        value: attribute[Object.keys(attribute)[0]] // Get the attribute's value
-      }))
-      .reduce((a: Object, c: any) => {
-        // Convert the value to a string and create a new object with the key and string value
-        const newObj: any = {};
-        newObj[c.key] = longToString(c.value);
-        return { ...a, ...newObj };
-      }, {});
+  const features: ArcGISFeatureType[] = [];
+  for (const feature of featureResult.features) {
+    const attributes: { [key: string]: any } = {};
+    for (let i = 0; i < feature.attributes.length; i++) {
+      const key = fieldNames[i];
+      const value = feature.attributes[i][Object.keys(feature.attributes[i])[0]];
+      attributes[key] = longToString(value);
+    }
 
-    // Parse the geometries and clean up the quantization
-    // Break the coords into X and Y rings
-    const x: LongType[] = [];
-    const y: LongType[] = [];
-    (feature.geometry.coords).forEach((coord, idx) => {
-      if (idx % 2 === 0) {
-        x.push(new Long(coord.low, coord.high, coord.unsigned));
-      } else {
-        y.push(new Long(coord.low, coord.high, coord.unsigned));
+    if (feature.geometry?.coords) {
+      const coordCount = feature.geometry.coords.length;
+      const x = new Array(coordCount / 2);
+      const y = new Array(coordCount / 2);
+
+      for (let i = 0, j = 0; i < coordCount; i += 2, j++) {
+        x[j] = feature.geometry.coords[i];
+        y[j] = feature.geometry.coords[i + 1];
       }
-    });
 
-    // dezigzag the rings and merge them
-    const counts = feature.geometry.lengths as Array<number>;
-    const ringsX = deZigZag(x, counts, transform.scale.xScale, transform.translate.xTranslate, false);
-    const ringsY = deZigZag(y, counts, transform.scale.yScale, transform.translate.yTranslate, transform.quantizeOriginPostion === 0);
-    const rings = ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]]));
+      const counts = feature.geometry.lengths || [];
+      const ringsX = deZigZag(x, counts, transform.scale.xScale, transform.translate.xTranslate, false);
+      const ringsY = deZigZag(y, counts, transform.scale.yScale, transform.translate.yTranslate, transform.quantizeOriginPostion === 0);
 
-    // Return the geometry and attributes for the feature
-    return {
-      geometry: geometryType === GeometryTypeEnum.esriGeometryTypePoint ?
-        (counts.length ? { x: rings[0][0][0], y: rings[0][0][1] } : {x: NaN, y: NaN}) :
-        (geometryType === GeometryTypeEnum.esriGeometryTypePolyline ?
-          { 'paths': rings } :
-          { 'rings': rings }
-        ),
-      attributes
-    };
-  }).filter(f => f !== undefined);
+      let geometry;
+      switch (geometryType) {
+        case GeometryTypeEnum.esriGeometryTypePoint:
+          geometry = counts.length ? { x: ringsX[0][0], y: ringsY[0][0] } as any : { x: NaN, y: NaN };
+          break;
+        case GeometryTypeEnum.esriGeometryTypeMultipoint:
+          geometry = { points: ringsX[0].map((x, i) => [x, ringsY[0][i]]) };
+          break;
+        case GeometryTypeEnum.esriGeometryTypePolyline:
+          geometry = { paths: ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]])) };
+          break;
+        default: // Polygon
+          geometry = { rings: ringsX.map((ring, i) => ring.map((x, j) => [x, ringsY[i][j]])) };
+      }
+      features.push({ geometry, attributes });
+    }
 
-  // Create and return the result object
-  return {
-    features: features as Array<ArcGISFeatureType>,
+    // Clear large objects periodically
+    if (features.length % 1000 === 0) {
+      clearLargeObjects();
+    }
+  }
+
+  const asJson: ArcGISJsonRestType = {
+    features,
     exceededTransferLimit: featureResult.exceededTransferLimit,
     objectIdFieldName: featureResult.objectIdFieldName,
     globalIdFieldName: featureResult.globalIdFieldName,
@@ -149,14 +119,36 @@ const messageToJson = (message: FeatureCollectionType): ArcGISJsonRestType => {
     hasM: featureResult.hasM,
     fields: featureResult.fields
   };
+
+  // Clear message and featureResult from memory
+  (message as any) = null;
+  (featureResult as any) = null;
+
+  return asJson;
 };
 
-export default async function esriPbf(arrayBuffer: Uint8Array, protoFile: string) {
-  const loader = await protobuf.load(protoFile);
+export default async function esriPbf(arrayBuffer: Uint8Array, protoFile: string): Promise<ArcGISJsonRestType> {
+  let loader: Root;
+  if (protoLoader) {
+    loader = protoLoader;
+  } else {
+    protoLoader = loader = await protobuf.load(protoFile);
+  }
   const messageLoader = loader.lookupType('esriPBuffer.FeatureCollectionPBuffer');
 
-  const esriFeatureCollection = messageLoader.decode(arrayBuffer) as unknown as FeatureCollectionType;
-  return messageToJson(esriFeatureCollection);
-};
+  try {
+    let esriFeatureCollection = messageLoader.decode(arrayBuffer) as unknown as FeatureCollectionType;
+    const result = messageToJson(esriFeatureCollection);
 
-export { longToString, deZigZag, messageToJson }; // Export for testing
+    // Clear large objects after processing
+    (esriFeatureCollection as any) = null;
+    clearLargeObjects();
+
+    return result;
+  } catch (e) {
+    console.error('Error decoding PBF message', e);
+    throw e;
+  }
+}
+
+export { longToString, deZigZag, messageToJson };

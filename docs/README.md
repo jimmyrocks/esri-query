@@ -1,4 +1,6 @@
-esri-query / [Exports](modules.md)
+**esri-query** • [**Docs**](globals.md)
+
+***
 
 # esri-query
 

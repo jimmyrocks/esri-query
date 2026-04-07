@@ -104,4 +104,31 @@ describe('EsriQuery.startQuery', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].queryObjectBase.outFields).toBe('*');
   });
+
+  test('forwards extra request headers to OID query options', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      header: ['Cookie: SESSION=abc123', 'X-Test: present'],
+    } as any);
+    query.totalFeatureCount = 10;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.startQuery();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].extraHeaders).toEqual({
+      Cookie: 'SESSION=abc123',
+      'X-Test': 'present',
+    });
+  });
 });

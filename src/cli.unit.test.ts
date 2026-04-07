@@ -78,4 +78,24 @@ describe('CLI main', () => {
     expect(payload.jobs).toHaveLength(1);
     expect(payload.jobs[0]['out-fields']).toBe('name,type');
   });
+
+  it('normalizes repeatable --header flags into a headers object during dry-run', async () => {
+    await main([
+      '--dry-run',
+      '--print-format', 'json',
+      '--url', 'https://example.com/arcgis/rest/services/Sample/FeatureServer/0',
+      '--where', '1=1',
+      '--header', 'Cookie: SESSION=abc123',
+      '--header', 'X-Test: value:with:colon',
+    ]);
+
+    const payload = JSON.parse(logs.join('\n'));
+    expect(process.exitCode).toBe(0);
+    expect(payload.jobs).toHaveLength(1);
+    expect(payload.jobs[0].headers).toEqual({
+      Cookie: 'SESSION=abc123',
+      'X-Test': 'value:with:colon',
+    });
+    expect(payload.jobs[0].header).toBeUndefined();
+  });
 });

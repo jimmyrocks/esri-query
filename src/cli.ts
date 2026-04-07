@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { extname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
-import { optionDefinitions as sharedOptionDefinitions, jobSchema, renderHelp } from './cli-options.js';
+import { optionDefinitions as sharedOptionDefinitions, jobSchema, parseExtraHeaders, renderHelp } from './cli-options.js';
 
 // ---- CLI-only types
 export type CliBaseOptionsType = {
@@ -155,6 +155,21 @@ function validateJob(merged: Record<string, unknown>, label: string) {
   return res.data as Record<string, unknown>;
 }
 
+function normalizeHeadersOption(job: Record<string, unknown>, label: string): Record<string, unknown> {
+  const normalized = { ...job };
+  const combined = [normalized.header, normalized.headers].filter(v => v != null);
+  if (!combined.length) return normalized;
+  try {
+    const headers = parseExtraHeaders(combined);
+    delete normalized.header;
+    if (headers) normalized.headers = headers;
+    else delete normalized.headers;
+    return normalized;
+  } catch (e) {
+    throw new Error(`${label}: ${(e as Error).message}`);
+  }
+}
+
 // ---- Run CLI ----
 export async function main(argv = process.argv.slice(2)) {
   let options: CliOptionsType = {};
@@ -194,7 +209,7 @@ export async function main(argv = process.argv.slice(2)) {
       const name = (job as ExtractJob).name ?? `job-${idx + 1}`;
       validateJobKeys(merged as Record<string, unknown>, new Set(optionDefinitions.map(o => String(o.name))), name);
       // Coerce/validate with Zod
-      const validated = validateJob(merged as Record<string, unknown>, name);
+      const validated = validateJob(normalizeHeadersOption(merged as Record<string, unknown>, name), name);
       return { name, ...validated };
     });
     const fmt: 'yaml' | 'json' = ((options as any)['print-format'] === 'json') ? 'json' : 'yaml';
@@ -226,7 +241,7 @@ export async function main(argv = process.argv.slice(2)) {
       if (parsed) (merged as any).bbox = parsed;
     }
     // DEBUG removed
-    const validatedMerged = validateJob(merged as Record<string, unknown>, String(label));
+    const validatedMerged = validateJob(normalizeHeadersOption(merged as Record<string, unknown>, String(label)), String(label));
     // Early validations
     const fmt = (validatedMerged as any).format;
     const out = (validatedMerged as any).output;

@@ -12,6 +12,7 @@ import GeoParquet from '../writers/GeoParquet.js';
 import Writer from '../writers/Writer.js';
 // Only OID-chunk strategy is supported now
 import OidChunkQueryTool from '../helpers/OidChunkTool.js';
+import { parseExtraHeaders } from '../cli-options.js';
 
 function normalizeOutFields(value: unknown): string | undefined {
   if (value == null) return undefined;
@@ -73,6 +74,8 @@ export type EsriQueryOptions = {
   'layer-name'?: string;
   dedupe?: boolean;
   token?: string;
+  header?: string | string[];
+  headers?: string | string[] | Record<string, string | number | boolean>;
 };
 
 const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
@@ -116,6 +119,7 @@ export default class EsriQuery {
   private _activeTool: OidChunkQueryTool | null = null;
   private _stopRequested = false;
   private _stopReason: 'max-records' | 'write-error' | null = null;
+  extraHeaders?: Record<string, string>;
 
   constructor(options: EsriQueryOptions) {
     this.options = options;
@@ -134,6 +138,7 @@ export default class EsriQuery {
     this.queryUrl = ensureQueryUrl(options.url);
 
     const configuredOutFields = normalizeOutFields((options as any)['out-fields'] ?? (options as any).outFields);
+    this.extraHeaders = parseExtraHeaders([(options as any).header, (options as any).headers]);
 
     // Create a 'whereObj' which is the Esri Rest params defined as EsriQueryObjectType
     this.whereObj = {
@@ -160,8 +165,8 @@ export default class EsriQuery {
   async getSourceInfo() {
     // Fetch source info and feature count in parallel
     const [source, countResult] = await Promise.all([
-      post(this.options.url, { f: 'json' }) as Promise<EsriFeatureLayerType>,
-      post(this.queryUrl, { ...this.whereObj, returnCountOnly: true })
+      post(this.options.url, { f: 'json' }, { headers: this.extraHeaders }) as Promise<EsriFeatureLayerType>,
+      post(this.queryUrl, { ...this.whereObj, returnCountOnly: true }, { headers: this.extraHeaders })
     ]);
 
     // Process fields
@@ -446,6 +451,7 @@ export default class EsriQuery {
       oidField,
       bbox,
       bboxWkid,
+      extraHeaders: this.extraHeaders,
     });
 
     let lastRetriesPrinted = 0;

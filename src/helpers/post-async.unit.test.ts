@@ -59,4 +59,50 @@ describe('post-async pbf/json fallback behavior', () => {
     expect(postMock).toHaveBeenCalledTimes(1);
     expect(getMock).not.toHaveBeenCalled();
   });
+
+  test('forwards custom request headers to POST and GET fallback requests', async () => {
+    postMock.mockResolvedValueOnce(new Response('', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    }));
+    getMock.mockResolvedValueOnce(new Response(
+      JSON.stringify({ features: [{ attributes: { OBJECTID: 2 } }] }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      },
+    ));
+
+    const out: any = await postAsync('https://example.com/FeatureServer/0/query', {
+      f: 'json',
+      where: '1=1',
+      outFields: '*',
+      returnGeometry: true,
+    } as any, {
+      headers: {
+        Cookie: 'SESSION=abc123',
+        'X-Test': 'present',
+      },
+    });
+
+    expect(Array.isArray(out.features)).toBe(true);
+    expect(postMock).toHaveBeenCalledWith(
+      'https://example.com/FeatureServer/0/query',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Cookie: 'SESSION=abc123',
+          'X-Test': 'present',
+        }),
+      }),
+    );
+    expect(getMock).toHaveBeenCalledWith(
+      expect.stringContaining('https://example.com/FeatureServer/0/query?'),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Cookie: 'SESSION=abc123',
+          'X-Test': 'present',
+        }),
+      }),
+    );
+  });
 });

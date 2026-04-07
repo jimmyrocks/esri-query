@@ -64,6 +64,7 @@ export interface QueryOptions {
   // Optional geometry filter
   bbox?: [number, number, number, number];   // [xmin, ymin, xmax, ymax]
   bboxWkid?: number;                         // optional spatial reference for bbox
+  extraHeaders?: Record<string, string>;
 }
 
 // -------------------------------
@@ -208,7 +209,7 @@ export default abstract class QueryToolBase extends EventEmitter {
         // eslint-disable-next-line no-console
         console.error('[query] POST', url, JSON.stringify(q).slice(0, 200) + (JSON.stringify(q).length > 200 ? '…' : ''));
       }
-      return await postAsyncHelper(url, q as any, combined);
+      return await postAsyncHelper(url, q as any, { signal: combined, headers: this.options.extraHeaders });
     });
   }
 

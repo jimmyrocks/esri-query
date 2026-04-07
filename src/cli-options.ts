@@ -56,6 +56,7 @@ export const optionDefinitions: OptionDef[] = [
   { name: 'on-invalid', alias: 'I', type: String, description: "How to handle invalid/malformed geometries: 'throw' | 'keep' | 'skip'", group: 'base' },
   { name: 'progress-every', alias: 'P', type: Number, description: 'Emit a progress tick every N accepted features (stderr).', group: 'base' },
   { name: 'bbox-wkid', alias: 'K', type: Number, description: 'Spatial reference WKID for the provided --bbox envelope.', group: 'base' },
+  { name: 'header', type: String, multiple: true, description: 'Extra request header, repeatable as "Name: value"', group: 'base' },
   { name: 'help', alias: 'h', type: Boolean, description: 'Show this help and exit.', group: 'general' },
   { name: 'config', alias: 'C', type: String, multiple: true, description: 'Path(s) to YAML/JSON config files merging in options and jobs.', group: 'general' },
   { name: 'dry-run', type: Boolean, description: 'Validate inputs and print resolved jobs without querying.', group: 'general' },
@@ -97,6 +98,8 @@ export const jobSchema = z.object({
   json: z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
   overwrite: z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
   token: z.string().optional(),
+  header: z.union([z.string(), z.array(z.string())]).optional(),
+  headers: z.union([z.string(), z.array(z.string()), z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))]).optional(),
   'oid-start': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'oid-concurrency': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'id-list-threshold': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
@@ -120,12 +123,57 @@ export type CliBaseOptionsType = {
   'progress-every'?: number;
   'bbox-wkid'?: number;
   help?: boolean;
+  header?: string | string[];
+  headers?: string | string[] | Record<string, string | number | boolean>;
   config?: string | string[];
   'dry-run'?: boolean;
   'print-format'?: 'yaml' | 'json';
   'strict-geometry'?: boolean;
   'antimeridian-aware'?: boolean;
 };
+
+export function parseExtraHeaders(value: unknown): Record<string, string> | undefined {
+  const parsed: Record<string, string> = {};
+
+  const addEntry = (name: string, headerValue: unknown) => {
+    const key = name.trim();
+    if (!key) throw new Error('Header names must not be empty.');
+    if (headerValue == null) throw new Error(`Header "${key}" is missing a value.`);
+    parsed[key] = String(headerValue).trim();
+  };
+
+  const addStringHeader = (entry: string) => {
+    const text = entry.trim();
+    if (!text) return;
+    const idx = text.indexOf(':');
+    if (idx <= 0) {
+      throw new Error(`Invalid header "${entry}". Expected "Name: value".`);
+    }
+    addEntry(text.slice(0, idx), text.slice(idx + 1));
+  };
+
+  const visit = (input: unknown) => {
+    if (input == null || input === '') return;
+    if (Array.isArray(input)) {
+      for (const item of input) visit(item);
+      return;
+    }
+    if (typeof input === 'string') {
+      addStringHeader(input);
+      return;
+    }
+    if (typeof input === 'object') {
+      for (const [name, headerValue] of Object.entries(input as Record<string, unknown>)) {
+        addEntry(name, headerValue);
+      }
+      return;
+    }
+    throw new Error(`Unsupported header value: ${String(input)}`);
+  };
+
+  visit(value);
+  return Object.keys(parsed).length ? parsed : undefined;
+}
 
 export function renderHelp(): string {
   const groups: Record<string, { title: string; keys: string[] }> = {
@@ -168,6 +216,9 @@ export function renderHelp(): string {
   lines.push('');
   lines.push('  # Robust run with skip policy and safety cap');
   lines.push('  esri-query -u URL -W "1=1" -t geojson -o layer.geojson -I skip -R 5000000');
+  lines.push('');
+  lines.push('  # Send a session cookie or any other custom header');
+  lines.push('  esri-query -u URL -W "1=1" --header "Cookie: SESSION=abc123" -t geojson -o out.geojson');
   lines.push('');
   lines.push('  # Write GeoParquet (columnar) with required output path');
   lines.push('  esri-query -u URL -W "1=1" -t geoparquet -o data.parquet');

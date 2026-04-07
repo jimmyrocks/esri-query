@@ -85,11 +85,12 @@ function parseRetryAfter(headers: Headers): number | undefined {
   return undefined;
 }
 
-function buildHeaders(format: string | undefined): Record<string, string> {
+function buildHeaders(format: string | undefined, extraHeaders?: Record<string, string>): Record<string, string> {
   return {
     Accept: format === 'pbf' ? 'application/x-protobuf, application/json' : 'application/json',
     'Content-Type': 'application/x-www-form-urlencoded',
-    'User-Agent': 'esri-query/1.x (+https://github.com/jimmyrocks/esri-query)'
+    'User-Agent': 'esri-query/1.x (+https://github.com/jimmyrocks/esri-query)',
+    ...(extraHeaders ?? {}),
   };
 }
 
@@ -118,6 +119,7 @@ function looksLikeHtml(s: string): boolean {
 async function tryGetFallback(
   url: string | URL,
   params: URLSearchParams,
+  headers?: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<any | undefined> {
   try {
@@ -130,7 +132,7 @@ async function tryGetFallback(
       // eslint-disable-next-line no-console
       console.error('[post-async] GET fallback', u.toString().slice(0, 400));
     }
-    const getRes = await ky.get(u.toString(), { throwHttpErrors: false, signal, retry: 0, timeout: 60000 });
+    const getRes = await ky.get(u.toString(), { throwHttpErrors: false, headers, signal, retry: 0, timeout: 60000 });
     debugLogHeaders(getRes);
     const getStatus = getRes.status;
     const getCtype = getRes.headers.get('content-type') || '';
@@ -148,7 +150,7 @@ async function tryGetFallback(
       sp2.set('f', 'pjson');
       u.search = sp2.toString();
       dlog('GET fallback (pjson)', u.toString().slice(0, 400));
-      const r2 = await ky.get(u.toString(), { throwHttpErrors: false, signal, retry: 0, timeout: 60000 });
+      const r2 = await ky.get(u.toString(), { throwHttpErrors: false, headers, signal, retry: 0, timeout: 60000 });
       debugLogHeaders(r2);
       const t2 = stripBom(await r2.text());
       const ct2 = r2.headers.get('content-type') || '';
@@ -180,10 +182,11 @@ async function tryGetFallback(
 export default async function postAsync(
   url: string | URL,
   query: EsriQueryObjectType,
-  signal?: AbortSignal
+  options?: { signal?: AbortSignal; headers?: Record<string, string> }
 ): Promise<unknown> {
   const normalizedUrl = String(url);
   const format = (query as any).f;
+  const signal = options?.signal;
 
   if (signal?.aborted) {
     const err = new EsriHttpError('Aborted');
@@ -191,11 +194,11 @@ export default async function postAsync(
     throw err;
   }
 
-  const headers = buildHeaders(format);
+  const headers = buildHeaders(format, options?.headers);
   const body = toSearchParams(query as unknown as Record<string, unknown>);
 
   if (process.env.ESRI_QUERY_GET_FIRST === '1') {
-    const early = await tryGetFallback(normalizedUrl, body, signal);
+    const early = await tryGetFallback(normalizedUrl, body, headers, signal);
     if (early !== undefined) {
       dlog('GET-first succeeded');
       return early;
@@ -281,7 +284,7 @@ export default async function postAsync(
         err.status = status; err.headers = headersObj; err.code = 'FORMAT_UNSUPPORTED';
         (err as any).debug = { url: normalizedUrl, format, hint: 'pbf parse failure' };
         // Also try GET fallback once (some servers only cooperate with GET)
-        const getAttempt = await tryGetFallback(normalizedUrl, body, signal);
+        const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal);
         if (getAttempt && (getAttempt.error || getAttempt.features || getAttempt.results)) {
           // Still JSON-ish → signal the caller to flip to JSON
           try {
@@ -323,7 +326,7 @@ export default async function postAsync(
       json = text && text.length ? JSON.parse(text) : {};
     } catch {
       // Try a GET fallback before declaring invalid JSON
-      const getAttempt = await tryGetFallback(normalizedUrl, body, signal);
+      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal);
       if (getAttempt !== undefined) {
         json = getAttempt;
       } else {
@@ -353,7 +356,7 @@ export default async function postAsync(
 
     // Unexpected content type; attempt GET fallback once
     if (json === undefined) {
-      const getAttempt = await tryGetFallback(normalizedUrl, body, signal);
+      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal);
       if (getAttempt !== undefined) return getAttempt;
 
       if (status >= 200 && status < 300) return { body: text, contentType: ctype };

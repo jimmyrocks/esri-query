@@ -19,6 +19,7 @@ Highlights:
 - Optional PBF with robust fallback to JSON
 - Streaming writers with backpressure
 - Token support for secured services
+- Custom request headers, including `Cookie`
 
 ## Install
 
@@ -71,6 +72,14 @@ Use a token for secured services:
 esri-query -u <layer-url> -W "1=1" --token "$ARCGIS_TOKEN" -t geoparquet -o data.parquet
 ```
 
+Use a session cookie or other custom header:
+
+```
+esri-query -u <layer-url> -W "1=1" --header "Cookie: SESSION=abc123" -t geojson -o out.geojson
+```
+
+If your service is secured by cookies, pass the cookie back as a `Cookie` request header. `Set-Cookie` is the response header a server sends to a client, so it is not what you pass to `esri-query`.
+
 S3 output (GeoParquet, FlatGeobuf):
 
 ```
@@ -110,6 +119,7 @@ Required:
 Query behavior:
 - `--json` (bool): Force JSON; disables PBF.
 - `--token` (string): ArcGIS token for secured services.
+- `--header` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
 - `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
 - `--progress, -p` (bool): Show progress, ETA, retries/backoff.
 - `--progress-every, -P` (number): Emit progress tick every N accepted features.
@@ -142,6 +152,9 @@ options:
   progress: true
   json: false
   token: ${ARCGIS_TOKEN}
+  headers:
+    Cookie: SESSION=abc123
+    X-Requested-With: esri-query
   oid-start: 250
   oid-concurrency: 2
   id-list-threshold: 500000
@@ -202,6 +215,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `--parquetScanRows`: GeoParquet schema lookahead rows (default 1000) to infer column types (numbers/booleans/timestamps).
 - `--dedupe`: Opt-in feature de-duplication by hashing. Beware of memory on very large layers.
 - `--token`: ArcGIS token for secured services (added to all requests).
+- `--header`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
 - `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
 - `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.
 - `--id-list-threshold`: If `totalCount` exceeds this, switch to OID range scanning (default 500000). Accepts YAML/JSON config.

@@ -461,6 +461,31 @@ describe('EsriQuery.startQuery', () => {
     expect(state.completed).toBe(false);
   });
 
+  test('fails loudly when a run writes some records but still ends far short of total count', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-shortfall-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const originalStartQuery = query.startQuery;
+    query.startQuery = async function () {
+      await (this as any).writeBatchFromArcgis([{ attributes: { OBJECTID: 1 }, geometry: null }] as any);
+    };
+
+    try {
+      await expect(query.start()).rejects.toThrow('Export stopped short without a terminal fetch error');
+    } finally {
+      query.startQuery = originalStartQuery;
+    }
+  });
+
   test('warns once when dedupe tracking crosses the configured threshold', async () => {
     const query = new EsriQuery({
       url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',

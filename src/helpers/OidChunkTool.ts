@@ -19,6 +19,27 @@ const MAX_ID_LIST_HEAP_SHARE = 0.25;
 export default class OidChunkQueryTool extends QueryToolBase {
   private _rangeScanStarted = false;
 
+  private emitFailure(scope: 'objectIds' | 'range', context: string, err: any, attempts: number) {
+    const payload = {
+      scope,
+      context,
+      attempts,
+      code: err?.code,
+      status: err?.status,
+      retryAfterMs: err?.retryAfterMs,
+      hint: err?.debug?.hint,
+      message: String(err?.message || err || 'unknown error'),
+    };
+    this.emit('failure', payload);
+    const meta = [
+      payload.code ? `code=${payload.code}` : '',
+      payload.status ? `status=${payload.status}` : '',
+      payload.retryAfterMs != null ? `retryAfter=${Math.round(Number(payload.retryAfterMs))}ms` : '',
+      payload.hint ? `hint=${payload.hint}` : '',
+    ].filter(Boolean).join(' ');
+    this.log(`[oid] ${scope} ${context} failed after ${attempts} attempt(s): ${payload.message}${meta ? ` [${meta}]` : ''}`);
+  }
+
   protected getApproxAvailableHeapBytes(): number | undefined {
     try {
       const heapLimit = Number(getHeapStatistics().heap_size_limit || 0);
@@ -67,7 +88,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
   }
 
   private isAbortError(err: any): boolean {
-    if (this.isCancelled()) return true;
+    if (!this.isCancelled()) return false;
     const code = String(err?.code ?? '');
     const name = String(err?.name ?? '');
     return code === 'ABORT' || code === 'EABORT' || name === 'AbortError';
@@ -113,6 +134,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
       const startIndex = Number.isFinite(resumeAfterOid)
         ? this.upperBound(objectIds, resumeAfterOid)
         : 0;
+      this.log(`[oid] objectIds=${objectIds.length}, startIndex=${startIndex}, chunk=${START_CHUNK_HINT(this.options.maxFeaturesPerRequest, this.options as any)}`);
       if (Number.isFinite(resumeAfterOid)) {
         this.log(`[oid] skipping ${startIndex} objectIds at or below resume checkpoint ${resumeAfterOid}`);
       }
@@ -145,6 +167,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const SHRINK_FACTOR = 0.5;
     const LOCAL_RETRIES = 2;
     const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
+    this.log(`[oid] mode=objectIds total=${objectIds.length} startIndex=${startIndex} chunkStart=${START_CHUNK} concurrency=${CONCURRENCY}`);
 
     let idx = Math.max(0, startIndex);
     let current = START_CHUNK;
@@ -197,14 +220,23 @@ export default class OidChunkQueryTool extends QueryToolBase {
           } catch (err: any) {
             if (this.isAbortError(err)) return;
             lastErr = err;
+            const attempt = tries + 1;
+            const meta = [
+              err?.code ? `code=${err.code}` : '',
+              err?.status ? `status=${err.status}` : '',
+              err?.retryAfterMs != null ? `retryAfter=${Math.round(Number(err.retryAfterMs))}ms` : '',
+              err?.debug?.hint ? `hint=${err.debug.hint}` : '',
+            ].filter(Boolean).join(' ');
+            this.log(`[oid] objectIds ${ids[0]}..${ids[ids.length - 1]} attempt ${attempt}/${LOCAL_RETRIES + 1} failed: ${String(err?.message || err || 'error')}${meta ? ` [${meta}]` : ''}`);
             tries += 1; this.errorCount++; onFailure();
-            if (this.errorCount > this.options.maxErrors) { this.emit('error', err); return; }
+            if (this.errorCount > this.options.maxErrors) { this.emitFailure('objectIds', `${ids[0]}..${ids[ids.length - 1]}`, err, attempt); throw err; }
             if (tries > LOCAL_RETRIES) break;
           }
         }
         if (!ok) {
           const err = lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'OID slice failed after retries'));
           err.message = `${err.message} (objectIds ${ids[0]}..${ids[ids.length - 1]})`;
+          this.emitFailure('objectIds', `${ids[0]}..${ids[ids.length - 1]}`, err, tries);
           throw err;
         }
       }
@@ -248,6 +280,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const resumeAfterOid = Number((this.options as any).resumeAfterOid);
     let start = Number.isFinite(resumeAfterOid) ? Math.max(minOid, Math.floor(resumeAfterOid) + 1) : minOid;
     this._rangeScanStarted = true;
+    this.log(`[oid] mode=range oidField=${oidField} min=${minOid} max=${maxOid} start=${start} windowStart=${window} concurrency=${CONCURRENCY}`);
     const nextRange = (): { a: number; b: number } | null => {
       if (start > maxOid) return null; const a = start; const b = Math.min(maxOid, a + window - 1); start = b + 1; return { a, b };
     };
@@ -276,20 +309,36 @@ export default class OidChunkQueryTool extends QueryToolBase {
           catch (err: any) {
             if (this.isAbortError(err)) return;
             lastErr = err;
+            const attempt = tries + 1;
+            const meta = [
+              err?.code ? `code=${err.code}` : '',
+              err?.status ? `status=${err.status}` : '',
+              err?.retryAfterMs != null ? `retryAfter=${Math.round(Number(err.retryAfterMs))}ms` : '',
+              err?.debug?.hint ? `hint=${err.debug.hint}` : '',
+            ].filter(Boolean).join(' ');
+            this.log(`[oid] range ${oidField} BETWEEN ${r.a} AND ${r.b} attempt ${attempt}/${LOCAL_RETRIES + 1} failed: ${String(err?.message || err || 'error')}${meta ? ` [${meta}]` : ''}`);
             tries += 1;
             this.errorCount++;
             onFailure();
-            if (this.errorCount > this.options.maxErrors) { this.emit('error', err); return; }
+            if (this.errorCount > this.options.maxErrors) { this.emitFailure('range', `${oidField} BETWEEN ${r.a} AND ${r.b}`, err, attempt); throw err; }
             if (tries > LOCAL_RETRIES) break;
           }
         }
         if (!ok) {
           const err = lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'OID range failed after retries'));
           err.message = `${err.message} (${oidField} BETWEEN ${r.a} AND ${r.b})`;
+          this.emitFailure('range', `${oidField} BETWEEN ${r.a} AND ${r.b}`, err, tries);
           throw err;
         }
       }
     };
     await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
   }
+}
+
+function START_CHUNK_HINT(maxFeaturesPerRequest: number | undefined, options: { oidStart?: number } | any): number {
+  const desired = maxFeaturesPerRequest || 1000;
+  const MAX_CHUNK = Math.max(1, Math.min(desired, 5000));
+  const MIN_CHUNK = 1;
+  return Math.max(MIN_CHUNK, Math.min(Number((options as any).oidStart ?? process.env.ESRIQ_OID_START ?? 250), MAX_CHUNK));
 }

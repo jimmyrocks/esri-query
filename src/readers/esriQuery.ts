@@ -822,6 +822,20 @@ export default class EsriQuery {
         await this._lastWrite.catch(() => {});
       }
       if (this._writeError) throw this._writeError;
+      const summary = this.writer.getSummary();
+      const dedupeEnabled = Boolean((this.options as any).dedupe);
+      const onInvalid = (this.options as any)['on-invalid'] ?? (this.options as any).onInvalid;
+      const shortfall = Math.max(0, Number(this.totalFeatureCount || 0) - Number(summary.records || 0));
+      if (!this._stopRequested && this.totalFeatureCount > 0 && shortfall > 0 && this.runtimeParams.featureCount > 0 && !dedupeEnabled && onInvalid !== 'skip') {
+        const detail = [
+          `records=${summary.records}/${this.totalFeatureCount}`,
+          `invalid=${summary.invalid}`,
+          `skipped=${summary.skipped}`,
+          `lastCompletedOid=${this.resumeAfterOid ?? 'n/a'}`,
+          `resumeState=${this.resumeStatePath ?? 'n/a'}`,
+        ].join(', ');
+        throw new Error(`Export stopped short without a terminal fetch error: ${detail}. Rerun with DEBUG_ESRI_QUERY=1 for raw request diagnostics.`);
+      }
       if (this.resumeState && !this._stopRequested) {
         this.resumeState = this.buildResumeState(this.resumeState.oidField, {
           ...this.resumeState,
@@ -975,6 +989,21 @@ export default class EsriQuery {
                 process.stderr.write(`[net] retries=${r}, backoff≈${Math.round(b)}ms\n`);
               }
             } catch {}
+          });
+        } catch {}
+        try {
+          tool.on('failure', (evt: any) => {
+            const parts = [
+              `[fetch-fail] ${evt?.scope || 'request'} ${evt?.context || ''}`.trim(),
+              evt?.attempts ? `attempts=${evt.attempts}` : '',
+              evt?.code ? `code=${evt.code}` : '',
+              evt?.status ? `status=${evt.status}` : '',
+              evt?.retryAfterMs != null ? `retryAfter=${Math.round(Number(evt.retryAfterMs))}ms` : '',
+              evt?.hint ? `hint=${evt.hint}` : '',
+              evt?.message ? `message=${evt.message}` : '',
+              `checkpointOid=${this.resumeAfterOid ?? 'n/a'}`,
+            ].filter(Boolean);
+            process.stderr.write(parts.join(' ') + '\n');
           });
         } catch {}
       }

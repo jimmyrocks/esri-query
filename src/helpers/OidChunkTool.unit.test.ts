@@ -199,6 +199,49 @@ describe('OidChunkQueryTool range scan', () => {
     expect(fetchFeaturesMock).toHaveBeenCalledTimes(3);
   });
 
+  test('treats timeout-style abort errors as hard failures unless the tool was explicitly cancelled', async () => {
+    const tool = makeTool({ oidField: undefined, totalCount: 2, idListThreshold: 999999, oidStart: 2, maxFeaturesPerRequest: 2 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).returnIdsOnly) {
+        return { objectIds: [1, 2] };
+      }
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => {
+      const err: any = new Error('request aborted');
+      err.code = 'ABORT';
+      throw err;
+    });
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await expect(tool.runQuery()).rejects.toThrow('request aborted (objectIds 1..2)');
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(3);
+  });
+
+  test('still exits quietly on explicit cancellation', async () => {
+    const tool = makeTool({ oidField: undefined, totalCount: 2, idListThreshold: 999999, oidStart: 2, maxFeaturesPerRequest: 2 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).returnIdsOnly) {
+        return { objectIds: [1, 2] };
+      }
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => {
+      tool.cancel();
+      const err: any = new Error('request aborted');
+      err.code = 'ABORT';
+      throw err;
+    });
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await expect(tool.runQuery()).resolves.toBeUndefined();
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
+  });
+
   test('aborts range scan when a range exhausts local retries instead of silently skipping it', async () => {
     const tool = makeTool({ oidField: 'OBJECTID', totalCount: 10, oidWindow: 5, maxFeaturesPerRequest: 5 });
     const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {

@@ -97,7 +97,8 @@ type ResumeState = {
   url: string;
   queryUrl: string;
   where: string;
-  output: string;
+  output: string;                 // logical base output path from the CLI
+  checkpointPath?: string;        // actual on-disk file currently being resumed/written
   format: 'geojsonseq';
   oidField: string;
   outFields?: string;
@@ -317,6 +318,9 @@ export default class EsriQuery {
     const segmentIndex = outputMode === 'segmented'
       ? (Number.isFinite(Number(base?.segmentIndex)) ? Math.max(0, Number(base?.segmentIndex)) : 0)
       : undefined;
+    const checkpointPath = outputMode === 'segmented'
+      ? String(base?.checkpointPath ?? File.segmentPathFromOutput(String(this.options.output), segmentIndex ?? 0))
+      : String(base?.checkpointPath ?? this.options.output);
     return {
       version: 2,
       mode: 'geojsonseq-oid',
@@ -324,6 +328,7 @@ export default class EsriQuery {
       queryUrl: this.queryUrl,
       where: this.options.where,
       output: String(this.options.output),
+      checkpointPath,
       format: 'geojsonseq',
       oidField,
       outFields: this.whereObj.outFields ?? undefined,
@@ -457,11 +462,13 @@ export default class EsriQuery {
         outputBytes: checkpoint.outputBytes,
         segmentIndex: checkpoint.segmentIndex,
         maxFileBytes: checkpoint.maxFileBytes,
+        checkpointPath: checkpoint.path,
       };
     }
     return {
       outputMode: 'single-file',
       outputBytes: checkpoint.outputBytes,
+      checkpointPath: checkpoint.path,
     };
   }
 
@@ -528,16 +535,22 @@ export default class EsriQuery {
         );
       }
 
-      const outputExists = existsSync(String(this.options.output));
+      const loadedMode = this.getResumeOutputMode(loadedState);
+      const checkpointPath = loadedMode === 'segmented'
+        ? String(loadedState.checkpointPath ?? File.segmentPathFromOutput(String(this.options.output), Math.max(0, Number(loadedState.segmentIndex ?? 0))))
+        : String(this.options.output);
+      const checkpointExpected = Math.max(0, Number(loadedState.recordsWritten ?? 0)) > 0 || Math.max(0, Number(loadedState.outputBytes ?? 0)) > 0;
+      const outputExists = existsSync(checkpointPath);
       if (!outputExists) {
-        throw new Error(
-          `Resume state exists at ${this.resumeStatePath}, but output file is missing: ${this.options.output}. ` +
-          `Use --overwrite to start fresh.`
-        );
+        if (checkpointExpected) {
+          throw new Error(
+            `Resume state exists at ${this.resumeStatePath}, but checkpoint output is missing: ${checkpointPath}. ` +
+            `Use --overwrite to start fresh.`
+          );
+        }
       }
 
       let normalizedState: ResumeState = { ...loadedState };
-      const loadedMode = this.getResumeOutputMode(normalizedState);
       const loadedMaxFileBytes = Number(normalizedState.maxFileBytes);
       const configuredMaxFileBytes = this.getConfiguredMaxFileBytes();
       if (loadedMode === 'segmented') {

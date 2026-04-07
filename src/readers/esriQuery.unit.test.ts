@@ -252,6 +252,7 @@ describe('EsriQuery.startQuery', () => {
     expect(captured[0].oidConcurrency).toBe(1);
     expect(captured[0].stableOidOrder).toBe(true);
     expect(state.output).toBe(outputPath);
+    expect(state.checkpointPath).toBe(outputPath);
     expect(state.format).toBe('geojsonseq');
     expect(state.oidField).toBe('OBJECTID');
     expect(state.outputMode).toBe('single-file');
@@ -371,6 +372,7 @@ describe('EsriQuery.startQuery', () => {
     expect(state.outputMode).toBe('segmented');
     expect(state.segmentIndex).toBe(0);
     expect(state.maxFileBytes).toBe(256);
+    expect(state.checkpointPath).toBe(join(tempDir, 'rolled.part0000.geojsonl'));
   });
 
   test('migrates old single-file resume state into rolled segment files', async () => {
@@ -426,9 +428,66 @@ describe('EsriQuery.startQuery', () => {
     expect(state.outputMode).toBe('segmented');
     expect(state.segmentIndex).toBe(1);
     expect(state.outputBytes).toBe(0);
+    expect(state.checkpointPath).toBe(join(tempDir, 'out.part0001.geojsonl'));
     expect(existsSync(outputPath)).toBe(false);
     expect(existsSync(migratedPath)).toBe(true);
     expect(readFileSync(migratedPath, 'utf8')).toBe(firstLine);
+  });
+
+  test('resumes segmented output using the active part file even when the base output path does not exist', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    const segmentPath = join(tempDir, 'out.part0000.geojsonl');
+    const line = '{"type":"Feature","properties":{"OBJECTID":1},"geometry":null}\n';
+    writeFileSync(segmentPath, line);
+    writeFileSync(resumePath, JSON.stringify({
+      version: 2,
+      mode: 'geojsonseq-oid',
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      queryUrl: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0/query',
+      where: '1=1',
+      output: outputPath,
+      checkpointPath: segmentPath,
+      format: 'geojsonseq',
+      oidField: 'OBJECTID',
+      outputMode: 'segmented',
+      outputBytes: Buffer.byteLength(line),
+      segmentIndex: 0,
+      maxFileBytes: 256,
+      lastCompletedOid: 1,
+      recordsWritten: 1,
+      completed: false,
+      updatedAt: new Date().toISOString(),
+    }, null, 2));
+
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].resumeAfterOid).toBe(1);
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.checkpointPath).toBe(segmentPath);
   });
 
   test('does not mark resume state completed when the run stops early', async () => {

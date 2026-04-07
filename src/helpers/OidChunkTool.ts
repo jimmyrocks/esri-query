@@ -19,6 +19,74 @@ const MAX_ID_LIST_HEAP_SHARE = 0.25;
 export default class OidChunkQueryTool extends QueryToolBase {
   private _rangeScanStarted = false;
 
+  private isExceededTransferLimitError(err: any): boolean {
+    const code = String(err?.code ?? '');
+    const message = String(err?.message ?? '').toLowerCase();
+    return code === 'EXCEEDED_TRANSFER_LIMIT' || message.includes('exceeded transfer limit');
+  }
+
+  private async getRangeBounds(oidField: string): Promise<{ minOid: number; maxOid: number }> {
+    const whereBase = this.queryObjectBase.where ?? '1=1';
+    const statsBase: EsriQueryObjectType = {
+      ...(this.queryObjectBase as any),
+      where: whereBase,
+      outStatistics: [
+        { statisticType: 'min', onStatisticField: oidField, outStatisticFieldName: 'min' },
+        { statisticType: 'max', onStatisticField: oidField, outStatisticFieldName: 'max' },
+      ] as any,
+      returnGeometry: false as any,
+      f: 'json',
+    } as any;
+    delete (statsBase as any).outFields;
+    delete (statsBase as any).outSR;
+    delete (statsBase as any).objectIds;
+
+    try {
+      const stats = await this.postAsync(this._baseUrl, statsBase as any);
+      const rec = Array.isArray(stats?.statistics) ? stats.statistics[0] : (stats as any)?.features?.[0]?.attributes;
+      const minOid = Number(rec?.min ?? rec?.MIN);
+      const maxOid = Number(rec?.max ?? rec?.MAX);
+      if (Number.isFinite(minOid) && Number.isFinite(maxOid) && minOid <= maxOid) {
+        return { minOid, maxOid };
+      }
+      throw new Error('Invalid OID min/max from statistics');
+    } catch (statsErr: any) {
+      this.log(`[oid] stats probe failed; trying ordered min/max (${statsErr?.message || statsErr})`);
+    }
+
+    const baseProbe: EsriQueryObjectType = {
+      ...(this.queryObjectBase as any),
+      where: whereBase,
+      outFields: oidField,
+      returnGeometry: false as any,
+      resultRecordCount: 1 as any,
+      returnZ: false as any,
+      returnM: false as any,
+      f: 'json',
+    } as any;
+    delete (baseProbe as any).outStatistics;
+    delete (baseProbe as any).outSR;
+    delete (baseProbe as any).objectIds;
+
+    const [minResp, maxResp] = await Promise.all([
+      this.postAsync(this._baseUrl, {
+        ...baseProbe,
+        orderByFields: `${oidField} ASC` as any,
+      } as any),
+      this.postAsync(this._baseUrl, {
+        ...baseProbe,
+        orderByFields: `${oidField} DESC` as any,
+      } as any),
+    ]);
+
+    const minOid = Number((minResp as any)?.features?.[0]?.attributes?.[oidField]);
+    const maxOid = Number((maxResp as any)?.features?.[0]?.attributes?.[oidField]);
+    if (!Number.isFinite(minOid) || !Number.isFinite(maxOid) || minOid > maxOid) {
+      throw new Error('Invalid OID min/max from ordered probe');
+    }
+    return { minOid, maxOid };
+  }
+
   private emitFailure(scope: 'objectIds' | 'range', context: string, err: any, attempts: number) {
     const payload = {
       scope,
@@ -250,25 +318,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const oidField = String((this.options as any).oidField ?? '').trim();
     if (!oidField) throw new Error('Could not determine OID field for range scan');
     if (this.isCancelled()) return;
-    const statsBase: EsriQueryObjectType = {
-      ...(this.queryObjectBase as any),
-      where: this.queryObjectBase.where ?? '1=1',
-      outStatistics: [
-        { statisticType: 'min', onStatisticField: oidField, outStatisticFieldName: 'min' },
-        { statisticType: 'max', onStatisticField: oidField, outStatisticFieldName: 'max' },
-      ] as any,
-      returnGeometry: false as any,
-      f: 'json',
-    } as any;
-    // Statistics queries should not inherit feature-return params like outFields/outSR.
-    delete (statsBase as any).outFields;
-    delete (statsBase as any).outSR;
-    delete (statsBase as any).objectIds;
-
-    const stats = await this.postAsync(this._baseUrl, statsBase as any);
-    const rec = Array.isArray(stats?.statistics) ? stats.statistics[0] : (stats as any)?.features?.[0]?.attributes;
-    const minOid = Number(rec?.min ?? rec?.MIN); const maxOid = Number(rec?.max ?? rec?.MAX);
-    if (!Number.isFinite(minOid) || !Number.isFinite(maxOid) || minOid > maxOid) throw new Error('Invalid OID min/max for range scan');
+    const { minOid, maxOid } = await this.getRangeBounds(oidField);
 
     const desired = this.options.maxFeaturesPerRequest || 1000;
     const MAX_WINDOW = Math.max(1, Math.min(desired * 5, 20000));
@@ -279,10 +329,17 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
     const resumeAfterOid = Number((this.options as any).resumeAfterOid);
     let start = Number.isFinite(resumeAfterOid) ? Math.max(minOid, Math.floor(resumeAfterOid) + 1) : minOid;
+    const pending: Array<{ a: number; b: number }> = [];
     this._rangeScanStarted = true;
     this.log(`[oid] mode=range oidField=${oidField} min=${minOid} max=${maxOid} start=${start} windowStart=${window} concurrency=${CONCURRENCY}`);
     const nextRange = (): { a: number; b: number } | null => {
-      if (start > maxOid) return null; const a = start; const b = Math.min(maxOid, a + window - 1); start = b + 1; return { a, b };
+      const queued = pending.shift();
+      if (queued) return queued;
+      if (start > maxOid) return null;
+      const a = start;
+      const b = Math.min(maxOid, a + window - 1);
+      start = b + 1;
+      return { a, b };
     };
     const onSuccess = () => { fullStreak += 1; if (fullStreak >= GROW_STREAK) { window = Math.min(MAX_WINDOW, Math.floor(window * 1.5)); fullStreak = 0; this.log(`[oid] increased window to ${window}`); } };
     const onFailure = () => { window = Math.max(MIN_WINDOW, Math.floor(window * 0.5)); fullStreak = 0; this.log(`[oid] decreased window to ${window}`); };
@@ -305,10 +362,24 @@ export default class OidChunkQueryTool extends QueryToolBase {
         let tries = 0; let ok = false;
         let lastErr: any;
         while (tries <= LOCAL_RETRIES && !ok) {
-          try { const features = await this.fetchFeatures(q); if (features.length) this.emit('data', features as EsriFeatureType[]); ok = true; onSuccess(); }
+          try {
+            const features = await this.fetchFeatures(q);
+            if (features.length) this.emit('data', features as EsriFeatureType[]);
+            ok = true;
+            onSuccess();
+          }
           catch (err: any) {
             if (this.isAbortError(err)) return;
             lastErr = err;
+            if (this.isExceededTransferLimitError(err) && r.a < r.b) {
+              const mid = r.a + Math.floor((r.b - r.a) / 2);
+              onFailure();
+              pending.unshift({ a: mid + 1, b: r.b });
+              pending.unshift({ a: r.a, b: mid });
+              this.log(`[oid] split range ${oidField} BETWEEN ${r.a} AND ${r.b} -> ${r.a}..${mid}, ${mid + 1}..${r.b}`);
+              ok = true;
+              break;
+            }
             const attempt = tries + 1;
             const meta = [
               err?.code ? `code=${err.code}` : '',

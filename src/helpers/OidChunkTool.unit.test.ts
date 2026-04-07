@@ -67,6 +67,9 @@ describe('OidChunkQueryTool range scan', () => {
       if ((params as any).outStatistics) {
         throw new Error('Unable to perform query. Please check your parameters.');
       }
+      if ((params as any).orderByFields === 'OBJECTID ASC' || (params as any).orderByFields === 'OBJECTID DESC') {
+        throw new Error('Order by probe failed');
+      }
       if ((params as any).returnIdsOnly) {
         return { objectIds: [1, 2, 3] };
       }
@@ -79,11 +82,42 @@ describe('OidChunkQueryTool range scan', () => {
 
     await tool.runQuery();
 
-    expect(postAsyncMock).toHaveBeenCalledTimes(2);
+    expect(postAsyncMock).toHaveBeenCalledTimes(4);
     expect((postAsyncMock.mock.calls[0][1] as any).outStatistics).toBeDefined();
-    expect((postAsyncMock.mock.calls[1][1] as any).returnIdsOnly).toBe(true);
+    expect((postAsyncMock.mock.calls[1][1] as any).orderByFields).toBe('OBJECTID ASC');
+    expect((postAsyncMock.mock.calls[2][1] as any).orderByFields).toBe('OBJECTID DESC');
+    expect((postAsyncMock.mock.calls[3][1] as any).returnIdsOnly).toBe(true);
     expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
     expect(String((fetchFeaturesMock.mock.calls[0][0] as any).objectIds || '')).toBe('1,2,3');
+  });
+
+  test('uses ordered min/max fallback when statistics queries are unavailable', async () => {
+    const tool = makeTool({ oidField: 'OBJECTID', totalCount: 3 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).outStatistics) {
+        throw new Error('Statistics not supported');
+      }
+      if ((params as any).orderByFields === 'OBJECTID ASC') {
+        return { features: [{ attributes: { OBJECTID: 1 } }] };
+      }
+      if ((params as any).orderByFields === 'OBJECTID DESC') {
+        return { features: [{ attributes: { OBJECTID: 3 } }] };
+      }
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => []);
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await tool.runQuery();
+
+    expect(postAsyncMock).toHaveBeenCalledTimes(3);
+    expect((postAsyncMock.mock.calls[0][1] as any).outStatistics).toBeDefined();
+    expect((postAsyncMock.mock.calls[1][1] as any).orderByFields).toBe('OBJECTID ASC');
+    expect((postAsyncMock.mock.calls[2][1] as any).orderByFields).toBe('OBJECTID DESC');
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
+    expect(String((fetchFeaturesMock.mock.calls[0][0] as any).where || '')).toContain('OBJECTID BETWEEN 1 AND 3');
   });
 
   test('fails fast when objectId fallback returns fewer ids than the known total', async () => {
@@ -257,5 +291,32 @@ describe('OidChunkQueryTool range scan', () => {
 
     await expect(tool.runQuery()).rejects.toThrow('range failed (OBJECTID BETWEEN 1 AND 10)');
     expect(fetchFeaturesMock).toHaveBeenCalledTimes(3);
+  });
+
+  test('splits a too-wide range instead of retrying the same transfer-limited window', async () => {
+    const tool = makeTool({ oidField: 'OBJECTID', totalCount: 10, oidWindow: 10, maxFeaturesPerRequest: 10 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).outStatistics) return { statistics: [{ min: 1, max: 10 }] };
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async (params: Record<string, unknown>) => {
+      const where = String((params as any).where || '');
+      if (where.includes('OBJECTID BETWEEN 1 AND 10')) {
+        const err: any = new Error('Query exceeded transfer limit');
+        err.code = 'EXCEEDED_TRANSFER_LIMIT';
+        throw err;
+      }
+      return [];
+    });
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await tool.runQuery();
+
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(3);
+    expect(String((fetchFeaturesMock.mock.calls[0][0] as any).where || '')).toContain('OBJECTID BETWEEN 1 AND 10');
+    expect(String((fetchFeaturesMock.mock.calls[1][0] as any).where || '')).toContain('OBJECTID BETWEEN 1 AND 5');
+    expect(String((fetchFeaturesMock.mock.calls[2][0] as any).where || '')).toContain('OBJECTID BETWEEN 6 AND 10');
   });
 });

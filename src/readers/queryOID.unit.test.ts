@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
 import QueryToolBase, { QueryOptions } from './queryOID.js';
 
-class TestQueryTool extends QueryToolBase {}
+class TestQueryTool extends QueryToolBase {
+  async runQuery(): Promise<void> {}
+
+  public async callFetchFeatures(params: Record<string, unknown>) {
+    return await this.fetchFeatures(params as any);
+  }
+}
 
 function makeTool(overrides: Partial<QueryOptions> = {}) {
   return new TestQueryTool({
@@ -61,5 +67,20 @@ describe('QueryToolBase rate limiter configuration', () => {
 
     expect((first as any)._limiter).toBe((second as any)._limiter);
     expect((first as any)._limiter).not.toBe((third as any)._limiter);
+  });
+
+  test('treats exceeded transfer limit as a hard error so callers can shrink the current request', async () => {
+    const tool = makeTool();
+    (tool as any).postAsync = async () => ({
+      features: [{ attributes: { OBJECTID: 1 } }],
+      exceededTransferLimit: true,
+    });
+
+    await expect(tool.callFetchFeatures({
+      where: '1=1',
+      outFields: '*',
+      returnGeometry: true,
+      f: 'json',
+    })).rejects.toMatchObject({ code: 'EXCEEDED_TRANSFER_LIMIT' });
   });
 });

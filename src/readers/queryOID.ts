@@ -309,6 +309,16 @@ export default abstract class QueryToolBase extends EventEmitter {
       }
 
       if (data && Array.isArray(data.features)) {
+        if (Boolean((data as any).exceededTransferLimit)) {
+          const err: any = new Error('Query exceeded transfer limit');
+          err.code = 'EXCEEDED_TRANSFER_LIMIT';
+          err.status = 200;
+          err.body = {
+            exceededTransferLimit: true,
+            featureCount: data.features.length,
+          };
+          throw err;
+        }
         this.emit('metrics', { ...this._metrics });
         return data.features as Array<EsriFeatureType>;
       }

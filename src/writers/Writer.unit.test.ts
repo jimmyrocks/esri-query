@@ -1,106 +1,90 @@
-import Writer from './Writer'; // Update the path accordingly
-import { Geometry, Feature } from "geojson";
+import { describe, it, expect, beforeEach } from '@jest/globals';
+import type { Geometry, Feature } from 'geojson';
+import Writer from './Writer.js';
+
+/**
+ * Minimal concrete writer for testing the abstract base class.
+ */
+class TestWriter extends Writer {
+    async open(): Promise<void> { this._markOpen(); }
+    async close(): Promise<void> { this._markClosed(); }
+    async writeString(_line: string): Promise<void> { /* no-op */ }
+
+    // Expose protected bbox generator for unit testing
+    public bboxOf(g: any) {
+        // @ts-ignore accessing protected for test purposes
+        return this.generateBbox(g);
+    }
+
+    async sinkWrite(payload: string): Promise<void> { }
+
+}
 
 describe('Writer', () => {
-    let writer: Writer;
+    let writer: TestWriter;
 
     beforeEach(() => {
-        writer = new Writer({ 'no-bbox': false }); // Passing options that you use in your Writer class
+        writer = new TestWriter({ 'no-bbox': false } as any);
     });
 
-    it('should correctly create a bounding box from GeoJSON geometry', () => {
+    it('correctly creates a bbox from GeoJSON geometry and updates running bbox', async () => {
         const geometry: Geometry = { type: 'Point', coordinates: [125.6, 10.1] };
 
-        const bbox = writer.generateBbox(geometry);
+        const bbox = writer.bboxOf(geometry);
 
-        expect(bbox).toEqual([125.6, 10.1, 125.6, 10.1]); // Checking case with point, bbox should be same as the point itself
-        expect(writer.status.bbox).toEqual([125.6, 10.1, 125.6, 10.1]); // It should also update the status' bbox after calculating new bbox
+        expect(bbox).toEqual([125.6, 10.1, 125.6, 10.1]);
+        expect(writer.status.bbox).toEqual([125.6, 10.1, 125.6, 10.1]);
     });
 
-    // Test with type: Point
-    it('should correctly generate bbox for Point', () => {
-        const geometry: Geometry = { type: 'Point', coordinates: [10, 20] };
-
-        const bbox = writer.generateBbox(geometry);
-
-        expect(bbox).toEqual([10, 20, 10, 20]);
+    it('generates bbox for multiple geometry types', async () => {
+        expect(writer.bboxOf({ type: 'Point', coordinates: [10, 20] } as Geometry)).toEqual([10, 20, 10, 20]);
+        expect(writer.bboxOf({ type: 'MultiPoint', coordinates: [[10, 20], [30, 40]] } as Geometry)).toEqual([10, 20, 30, 40]);
+        expect(writer.bboxOf({ type: 'LineString', coordinates: [[10, 20], [30, 40]] } as Geometry)).toEqual([10, 20, 30, 40]);
+        expect(writer.bboxOf({ type: 'MultiLineString', coordinates: [[[10, 20], [30, 40]], [[-10, -20], [-30, -40]]] } as Geometry)).toEqual([-30, -40, 30, 40]);
+        expect(writer.bboxOf({ type: 'Polygon', coordinates: [[[10, 20], [30, 40], [10, 40], [10, 20]]] } as Geometry)).toEqual([10, 20, 30, 40]);
+        expect(writer.bboxOf({ type: 'MultiPolygon', coordinates: [[[[10, 20], [30, 40], [10, 40], [10, 20]]], [[[-10, -20], [-30, -40], [-10, -40], [-10, -20]]]] } as Geometry)).toEqual([-30, -40, 30, 40]);
     });
 
-    // Test with type: MultiPoint
-    it('should correctly generate bbox for MultiPoint', () => {
-        const geometry: Geometry = { type: 'MultiPoint', coordinates: [[10, 20], [30, 40]] };
-
-        const bbox = writer.generateBbox(geometry);
-
-        expect(bbox).toEqual([10, 20, 30, 40]);
-    });
-
-    // Test with type: LineString
-    it('should correctly generate bbox for LineString', () => {
-        const geometry: Geometry = { type: 'LineString', coordinates: [[10, 20], [30, 40]] };
-
-        const bbox = writer.generateBbox(geometry);
-
-        expect(bbox).toEqual([10, 20, 30, 40]);
-    });
-
-    // Test with type: MultiLineString
-    it('should correctly generate bbox for MultiLineString', () => {
-        const geometry: Geometry = { type: 'MultiLineString', coordinates: [[[10, 20], [30, 40]], [[-10, -20], [-30, -40]]] };
-
-        const bbox = writer.generateBbox(geometry);
-
-        expect(bbox).toEqual([-30, -40, 30, 40]);
-    });
-
-    // Test with type: Polygon
-    it('should correctly generate bbox for Polygon', () => {
-        const geometry: Geometry = { type: 'Polygon', coordinates: [[[10, 20], [30, 40], [10, 40], [10, 20]]] };
-
-        const bbox = writer.generateBbox(geometry);
-
-        expect(bbox).toEqual([10, 20, 30, 40]);
-    });
-
-    // Test with type: MultiPolygon
-    it('should correctly generate bbox for MultiPolygon', () => {
-        const geometry: Geometry = { type: 'MultiPolygon', coordinates: [[[[10, 20], [30, 40], [10, 40], [10, 20]]], [[[-10, -20], [-30, -40], [-10, -40], [-10, -20]]]] };
-
-        const bbox = writer.generateBbox(geometry);
-
-        expect(bbox).toEqual([-30, -40, 30, 40]);
-    });
-
-    it('should add bbox to feature and increment records if canWrite is true', () => {
-        writer.open(); // Setting canWrite to true
+    it('adds bbox to feature and increments records when open', async () => {
+        await writer.open();
 
         const feature: Feature = {
             type: 'Feature',
-            geometry: {
-                type: 'Point',
-                coordinates: [125.6, 10.1]
-            },
-            properties: {}
+            geometry: { type: 'Point', coordinates: [125.6, 10.1] },
+            properties: {},
         };
 
-        const resultingFeature = writer.writeFeature(feature);
+        const resultingFeature = await writer.writeFeature(feature);
 
-        expect(resultingFeature.bbox).toEqual([125.6, 10.1, 125.6, 10.1]); // Bbox should be added to the feature
-        expect(writer.status.records).toEqual(1); // records should be incremented
+        expect(resultingFeature.bbox).toEqual([125.6, 10.1, 125.6, 10.1]);
+        expect(writer.status.records).toBe(1);
     });
 
-    it('should throw an error if canWrite is false', () => {
-        writer.close(); // Setting canWrite to false
+    it('throws when writing while closed', async () => {
+        await writer.close();
 
         const feature: Feature = {
             type: 'Feature',
-            geometry: {
-                type: 'Point',
-                coordinates: [125.6, 10.1]
-            },
-            properties: {}
+            geometry: { type: 'Point', coordinates: [125.6, 10.1] },
+            properties: {},
         };
 
-        expect(() => writer.writeFeature(feature)).toThrow('Feature cannot be written'); // It should throw an error
+        await expect(writer.writeFeature(feature)).rejects.toThrow('Writer is closed: cannot write feature');
+    });
+
+    it('honors kebab-case CLI/config option names', () => {
+        const configured = new TestWriter({
+            'antimeridian-aware': false,
+            'max-records': 2,
+            'on-invalid': 'keep',
+            'progress-every': 5,
+            'strict-geometry': false,
+        } as any);
+
+        expect(configured.antimeridianAware).toBe(false);
+        expect(configured.maxRecords).toBe(2);
+        expect(configured.onInvalid).toBe('keep');
+        expect(configured.progressEvery).toBe(5);
+        expect(configured.strictGeometry).toBe(false);
     });
 });

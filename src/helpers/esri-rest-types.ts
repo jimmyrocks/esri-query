@@ -5,9 +5,9 @@ export type EsriQueryObjectType = {
     orderByFields?: string
     returnGeometry?: boolean,
     resultRecordCount?: number,
-    inSR?: string,
-    outSR?: string,
-    geometry?: string,
+    inSR?: number | string,
+    outSR?: number | string,
+    geometry?: string | Record<string, unknown>,
     geometryType?: 'esriGeometryPoint' | 'esriGeometryMultipoint' | 'esriGeometryPolyline' | 'esriGeometryPolygon' | 'esriGeometryEnvelope',
     spatialRel?: 'esriSpatialRelIntersects' | 'esriSpatialRelContains' | 'esriSpatialRelCrosses' | 'esriSpatialRelEnvelopeIntersects' | 'esriSpatialRelIndexIntersects' | 'esriSpatialRelOverlaps' | 'esriSpatialRelTouches' | 'esriSpatialRelWithin',
     where?: string,
@@ -129,10 +129,10 @@ export type EsriFeatureLayerType = {
         shapeLengthFieldName: string,
         units: string
     },
-    minScale: string,
-    maxScale: string,
-    effectiveMinScale: string,
-    effectiveMaxScale: string,
+    minScale: number | string,
+    maxScale: number | string,
+    effectiveMinScale: number | string,
+    effectiveMaxScale: number | string,
     supportsQuantizationEditMode: boolean,
     advancedQueryCapabilities: {
         supportsPagination: boolean,
@@ -178,21 +178,21 @@ export type EsriFeatureLayerType = {
     extent: {
         xmin: number, ymin: number, xmax: number, ymax: number,
         spatialReference: {
-            wkid: string,
-            latestWkid: string,
+            wkid: number | string,
+            latestWkid: number | string,
             //Added at 10.6 when map is published with a vertical coordinate system
-            vcsWkid: string,
-            latestVcsWkid: string,
-            xyTolerance: string,
-            zTolerance: string,
-            mTolerance: string,
-            falseX: string,
-            falseY: string,
-            xyUnits: string,
-            falseZ: string,
-            zUnits: string,
-            falseM: string,
-            mUnits: string,
+            vcsWkid: number | string,
+            latestVcsWkid: number | string,
+            xyTolerance: number | string,
+            zTolerance: number | string,
+            mTolerance: number | string,
+            falseX: number | string,
+            falseY: number | string,
+            xyUnits: number | string,
+            falseZ: number | string,
+            zUnits: number | string,
+            falseM: number | string,
+            mUnits: number | string,
         }
     },
     //Added at 10.6. Only returned when a map is published with a vertical coordinate system
@@ -219,10 +219,10 @@ export type EsriFeatureLayerType = {
         falseX: number,
         falseY: number,
         xyUnits: number,
-        falseZ: string,
+        falseZ: number | string,
         zUnits: number,
         falseM: number,
-        mUnits: string
+        mUnits: number | string
     },
     //for feature layers only
     drawingInfo: {
@@ -343,7 +343,7 @@ export type EsriFeatureLayerType = {
     standardMaxRecordCount: number, //Added at 10.6.1
     tileMaxRecordCount: number, //Added at 10.6.1
     maxRecordCountFactor: number, //Added at 10.6.1
-    supportedQueryFormats: string, //Added at 10.1
+    supportedQueryFormats: string | string[], //Added at 10.1
     supportedExportFormats: string, //Added at 10.9.1
     supportedSpatialRelationships: Array<
         'esriSpatialRelIntersects' |

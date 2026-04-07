@@ -1,12 +1,19 @@
-[**esri-query**](README.md) • **Docs**
+[**esri-query**](README.md)
 
 ***
 
 # esri-query
 
+## Classes
+
+- [EsriQuery](classes/EsriQuery.md)
+
 ## Type Aliases
 
-- [CliBaseOptionsType](type-aliases/CliBaseOptionsType.md)
-- [CliGeoJsonOptionsType](type-aliases/CliGeoJsonOptionsType.md)
-- [CliOptionsType](type-aliases/CliOptionsType.md)
-- [CliSqlOptionsType](type-aliases/CliSqlOptionsType.md)
+- [EsriQueryOptions](type-aliases/EsriQueryOptions.md)
+
+## References
+
+### default
+
+Renames and re-exports [EsriQuery](classes/EsriQuery.md)

@@ -1,6 +1,5 @@
 import { arcgisToGeoJSON } from '@terraformer/arcgis';
 import crypto from 'crypto';
-import { CliOptionsType } from '..';
 import post from '../helpers/post-async.js';
 import * as ArcGIS from 'arcgis-rest-api';
 import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-types.js';
@@ -8,9 +7,73 @@ import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-
 import Stdout from '../writers/Stdout.js';
 import Gpkg from '../writers/Gpkg.js';
 import File from '../writers/File.js';
+import FlatGeobuf from '../writers/FlatGeobuf.js';
+import GeoParquet from '../writers/GeoParquet.js';
 import Writer from '../writers/Writer.js';
-import GeographicQueryTool from './QueryMethods/GeographicQuery.js';
-import PaginatedQueryTool from './QueryMethods/PaginatedQuery.js';
+// Only OID-chunk strategy is supported now
+import OidChunkQueryTool from '../helpers/OidChunkTool.js';
+
+function normalizeOutFields(value: unknown): string | undefined {
+  if (value == null) return undefined;
+
+  const raw: string[] = [];
+  const push = (entry: unknown) => {
+    if (entry == null) return;
+    const text = String(entry);
+    if (!text) return;
+    for (const token of text.split(',')) {
+      const trimmed = token.trim();
+      if (trimmed) raw.push(trimmed);
+    }
+  };
+
+  if (Array.isArray(value)) {
+    for (const entry of value) push(entry);
+  } else {
+    push(value);
+  }
+
+  if (!raw.length) return undefined;
+  if (raw.includes('*')) return '*';
+
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const field of raw) {
+    const key = field.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(field);
+  }
+
+  return deduped.length ? deduped.join(',') : undefined;
+}
+
+function ensureRequiredOutField(outFields: string | undefined, requiredField: string | undefined): string | undefined {
+  const required = String(requiredField ?? '').trim();
+  if (!required) return outFields;
+  if (!outFields || outFields === '*') return outFields;
+  return normalizeOutFields([outFields, required]);
+}
+
+export type EsriQueryOptions = {
+  url: string;
+  where: string;
+  bbox?: [number, number, number, number];
+  bboxWkid?: number;
+  'bbox-wkid'?: number;
+  outFields?: string | string[];
+  'out-fields'?: string | string[];
+  format?: 'esrijson' | 'geojson' | 'geojsonseq' | 'gpkg' | 'flatgeobuf' | 'geoparquet';
+  output?: string;
+  overwrite?: boolean;
+  json?: boolean;
+  progress?: boolean;
+  'feature-count'?: number;
+  'no-bbox'?: boolean;
+  'layer-name'?: string;
+  dedupe?: boolean;
+  token?: string;
+};
 
 const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
 
@@ -30,9 +93,10 @@ export default class EsriQuery {
       sortable: boolean
     }
   };
-  options: CliOptionsType;
+  options: EsriQueryOptions;
   sourceInfo?: EsriFeatureLayerType;
   totalFeatureCount: number;
+  supportsPagination?: boolean; // retained for compatibility (unused)
   runtimeParams: {
     hashList: Record<string, boolean>;
     featureCount: number;
@@ -43,22 +107,50 @@ export default class EsriQuery {
       runTime: 0
     };
 
-  writer: Writer;
+  private dotSplits: number[] = [];
+  private numSplits: number[] = [];
 
-  constructor(options: CliOptionsType) {
+  writer: Writer;
+  private _lastWrite: Promise<void> = Promise.resolve();
+  private _writeError: Error | null = null;
+  private _activeTool: OidChunkQueryTool | null = null;
+  private _stopRequested = false;
+  private _stopReason: 'max-records' | 'write-error' | null = null;
+
+  constructor(options: EsriQueryOptions) {
     this.options = options;
-    // Assign the url and queryUrl from 'options' to the current object (this)
+    // Assign the url and normalized queryUrl from 'options' to the current object (this)
     this.url = options.url;
-    this.queryUrl = options.url.replace(/\/$/g, '') + '/query';
+    const ensureQueryUrl = (u: string | URL): string => {
+      const url = new URL(String(u));
+      // If it already ends with /query, keep it
+      if (/\/query\/?$/i.test(url.pathname)) return url.toString();
+      // If it’s a MapServer/FeatureServer (optionally with layer id), append /query
+      if (/\/(MapServer|FeatureServer)(?:\/\d+)?\/?$/i.test(url.pathname)) {
+        url.pathname = url.pathname.replace(/\/?$/, '/query');
+      }
+      return url.toString();
+    };
+    this.queryUrl = ensureQueryUrl(options.url);
+
+    const configuredOutFields = normalizeOutFields((options as any)['out-fields'] ?? (options as any).outFields);
 
     // Create a 'whereObj' which is the Esri Rest params defined as EsriQueryObjectType
     this.whereObj = {
       'where': options.where,
       'returnGeometry': true,
-      'outFields': '*',
+      'outFields': configuredOutFields ?? '*',
       'outSR': '4326',
-      'f': 'json'
+      'f': 'json',
+      ...(options.token ? { token: options.token } : {}),
     };
+  }
+
+  private requestStop(reason: 'max-records' | 'write-error') {
+    if (this._stopRequested) return;
+    this._stopRequested = true;
+    this._stopReason = reason;
+    try { this._activeTool?.cancel(); } catch {}
   }
 
   /**
@@ -78,20 +170,40 @@ export default class EsriQuery {
       return { ...acc, [field.name]: { ...field, sortable } };
     }, {});
 
-    // Update feature count
-    this.options['feature-count'] = typeof this.options['feature-count'] === 'number'
-      ? Math.min(this.options['feature-count'], source.maxRecordCount)
-      : source.maxRecordCount;
+    // Keep OID available even when users narrow outFields.
+    const objectIdField = String((source as any).objectIdFieldName ?? (source as any).objectIdField ?? '').trim() || undefined;
+    this.whereObj.outFields = ensureRequiredOutField(this.whereObj.outFields, objectIdField);
+
+    // No-op: offset pagination removed; ordering hints are unnecessary now.
+
+    // Capability hints
+    this.supportsPagination = Boolean((source as any)?.advancedQueryCapabilities?.supportsPagination);
+
+    // Update feature count/page size hint
+    const requested = typeof this.options['feature-count'] === 'number' ? this.options['feature-count'] : undefined;
+    const serverCap = Number(source.maxRecordCount) || 1000;
+    this.options['feature-count'] = Math.max(1, Math.min(requested ?? serverCap, serverCap));
 
     // Determine query format
     const jsonFormats = ['esriGeometryPoint', 'esriGeometryMultipoint'];
-    const usePBF = source.supportedQueryFormats.includes('PBF') &&
-      !jsonFormats.includes(source.geometryType);
+    const supports = Array.isArray((source as any).supportedQueryFormats)
+      ? (source as any).supportedQueryFormats as string[]
+      : String((source as any).supportedQueryFormats || '').split(',').map(s => s.trim()).filter(Boolean);
+    const usePBF = supports.includes('PBF') && !jsonFormats.includes(source.geometryType);
     this.whereObj.f = this.options.json ? 'json' : (usePBF ? 'pbf' : 'json');
+
+    if (this.options.progress) process.stderr.write(`Using query format: ${this.whereObj.f} ${JSON.stringify(source.geometryType)} ${JSON.stringify(supports)}\n`);
 
     // Set source info and total feature count
     this.sourceInfo = source;
     this.totalFeatureCount = (countResult as { count: number }).count;
+    if (this.options.progress) process.stderr.write(`Total features matching query: ${this.totalFeatureCount}\n`);
+
+    // Precompute progress tick thresholds (avoids per-feature allocations)
+    const ten = Math.max(1, Math.floor(this.totalFeatureCount / 10));
+    const hundred = Math.max(1, Math.floor(this.totalFeatureCount / 100));
+    this.numSplits = Array.from({ length: 9 }, (_, i) => (i + 1) * ten);
+    this.dotSplits = Array.from({ length: 98 }, (_, i) => (i + 1) * hundred);
 
     return this.sourceInfo;
   };
@@ -102,6 +214,12 @@ export default class EsriQuery {
    * @throws Error if there is an issue reading source information.
    */
   async start(): Promise<typeof this.runtimeParams> {
+    this._lastWrite = Promise.resolve();
+    this._writeError = null;
+    this._activeTool = null;
+    this._stopRequested = false;
+    this._stopReason = null;
+
     // Ensure necessary source information and fields are available
     if (!this.sourceInfo || !this.fields) {
       try {
@@ -112,11 +230,14 @@ export default class EsriQuery {
     }
 
     // Determine the appropriate writer type based on the output format
-    let writerType: typeof Writer;
+    type WriterCtor = new (options: any, sourceInfo?: any) => Writer;
+    let writerType: WriterCtor;
     if (!this.options.format) {
-      this.options.format = (this.options.output && this.options.output.match(/\.gpkg$/))
-        ? 'gpkg'
-        : 'geojson';
+      const out = this.options.output || '';
+      if (/\.gpkg$/i.test(out)) this.options.format = 'gpkg';
+      else if (/\.fgb$/i.test(out)) this.options.format = 'flatgeobuf';
+      else if (/\.(parquet|gpq)$/i.test(out)) this.options.format = 'geoparquet';
+      else this.options.format = 'geojson';
     }
 
     switch (this.options.format) {
@@ -124,38 +245,91 @@ export default class EsriQuery {
       case 'geojson':
       case 'geojsonseq':
         writerType = this.options.output ? File : Stdout;
-        this.options['no-bbox'] = true;
         break;
       case 'gpkg':
         writerType = Gpkg;
+        break;
+      case 'flatgeobuf':
+        writerType = FlatGeobuf;
+        break;
+      case 'geoparquet':
+        writerType = GeoParquet;
         break;
       default:
         throw new Error(`Unsupported format: ${this.options}`);
     }
 
+    // FlatGeobuf requires a file output path
+    if (this.options.format === 'flatgeobuf') {
+      if (!this.options.output) {
+        throw new Error('FlatGeobuf requires --output pointing to a .fgb file or output directory');
+      }
+      if (!this.options.output.endsWith('.fgb')) {
+        process.stderr.write(`[warn] output extension should be ".fgb" for flatgeobuf (got "${this.options.output}")\n`);
+      }
+    }
+
+    if (this.options.format === 'geoparquet') {
+      if (!this.options.output) {
+        throw new Error('GeoParquet requires --output pointing to a .parquet file');
+      }
+      if (!/\.(parquet|gpq)$/i.test(this.options.output)) {
+        process.stderr.write(`[warn] output extension should be ".parquet" (or ".gpq") for GeoParquet (got "${this.options.output}")\n`);
+      }
+    }
+
     // Create the writer instance and start the queries
-    this.writer = new writerType(this.options, { ...this.sourceInfo, totalFeatureCount: this.totalFeatureCount });
+    const outWkid = Number(this.whereObj.outSR);
+    this.writer = new writerType(this.options as any, {
+      ...this.sourceInfo,
+      totalFeatureCount: this.totalFeatureCount,
+      outputWkid: Number.isFinite(outWkid) ? outWkid : undefined,
+    });
 
     // Update runtime parameters and track the process time
     const startTime = new Date();
 
     try {
-      this.writer.open();
-      if (this.options.format === 'esrijson') {
-        (this.writer as Stdout | File).writeString(JSON.stringify({
-          "displayFieldName": this.sourceInfo.displayField,
-          "geometryType": this.sourceInfo.geometryType,
-          "spatialReference": {
-            "wkid": 4326,
-            "latestWkid": 4326
-          },
-          "fields": this.sourceInfo.fields,
-          "features": []
-        }).replace(/\]\}$/g, ''));
+      await this.writer.open();
+      if (this.options.progress) {
+        const total = this.totalFeatureCount || 0;
+        this.writer.progressEvery = Math.max(1, Math.floor(Math.max(1, total) / 100));
+        const t0 = Date.now();
+        let lastStatus = t0;
+        this.writer.onProgress = ({ records, invalid, skipped }) => {
+          // Compact [0....10] style progress
+          if (records === 1) process.stderr.write('[0');
+          if (this.dotSplits.includes(records)) process.stderr.write('.');
+          const tenIndex = this.numSplits.indexOf(records);
+          if (tenIndex > -1) process.stderr.write(String(tenIndex + 1));
+          if (total && records === total) process.stderr.write('10]\n');
+
+          // Periodic status line with rates and ETA (every ~5s)
+          const now = Date.now();
+          if (now - lastStatus >= 5000) {
+            const elapsed = (now - t0) / 1000;
+            const rate = elapsed > 0 ? (records / elapsed) : 0;
+            const remaining = total > 0 ? Math.max(0, total - records) : 0;
+            const etaSec = rate > 0 && remaining > 0 ? Math.round(remaining / rate) : 0;
+            const fmt = (s: number) => {
+              const m = Math.floor(s / 60); const ss = s % 60; return m > 0 ? `${m}m${String(ss).padStart(2, '0')}s` : `${ss}s`;
+            };
+            const pct = total > 0 ? Math.floor((records / total) * 100) : 0;
+            process.stderr.write(`\n[progress] ${records}${total ? `/${total}` : ''} ${total ? `(${pct}%)` : ''} @ ${rate.toFixed(1)}/s, eta ${etaSec ? fmt(etaSec) : '—'}, invalid=${invalid}, skipped=${skipped}\n`);
+            lastStatus = now;
+          }
+        };
+
+        // Status handled below; metrics handled in startQuery() scope
       }
+
       await this.startQuery();
+
+      // Ensure all in-flight writes are flushed before closing
+      await this._lastWrite;
+      if (this._writeError) throw this._writeError;
     } finally {
-      this.writer.close();
+      await this.writer.close();
     }
 
     // Update runtime parameters to indicate the process is complete
@@ -170,20 +344,33 @@ export default class EsriQuery {
   async write(
     features: Array<EsriFeatureType> | undefined,
   ): Promise<void> {
-    const { options, writer, totalFeatureCount, runtimeParams } = this;
-    if (!features) return;
+    // Delegate to batching path to keep one implementation
+    return await this.writeBatchFromArcgis(features);
+  }
 
-    const convertGeometry = async (geometry: any): Promise<GeoJSON.Geometry | null> => {
+  /**
+   * Batch-write using Writer.writeBatch with an (async) iterable of GeoJSON features.
+   * Converts ArcGIS features, de-duplicates by hash, and updates progress based on
+   * writer-accepted (non-skipped) features.
+   */
+  private async writeBatchFromArcgis(
+    features: Array<EsriFeatureType> | undefined,
+  ): Promise<void> {
+    if (!features || !features.length) return;
+
+    const { options, writer, runtimeParams } = this;
+
+    const convertGeometry = (geometry: any): GeoJSON.Geometry | null => {
       if (!geometry) return null;
       try {
         return arcgisToGeoJSON(geometry) as GeoJSON.Geometry;
-      } catch (e) {
-        console.error('Error converting geometry:', e);
+      } catch {
         return null;
       }
     };
 
     const calculateHash = (geojson: GeoJSON.Feature): string => {
+      // Note: fast, order-sensitive; adequate for optional dedupe
       return crypto.createHash('sha1').update(JSON.stringify(geojson)).digest('hex');
     };
 
@@ -193,84 +380,129 @@ export default class EsriQuery {
       return true;
     };
 
-    const writeFeature = (geojson: GeoJSON.Feature): void => {
-      writer.writeFeature(geojson);
-      runtimeParams.featureCount++;
-    };
+    // (no-op progress helper removed; using writer.onProgress in start())
 
-    const showProgress = (): void => {
-      if (!options.progress) return;
-
-      const { featureCount } = runtimeParams;
-      const dotSplits = new Array(98).fill(0).map((_, i) => (i + 1) * Math.floor(this.totalFeatureCount / 100));
-      const numSplits = new Array(9).fill(0).map((_, i) => (i + 1) * Math.floor(this.totalFeatureCount / 10));
-
-      if (featureCount === 1) process.stderr.write('[0');
-      if (dotSplits.indexOf(featureCount) > -1) process.stderr.write('.');
-      if (numSplits.indexOf(featureCount) > -1) process.stderr.write((numSplits.indexOf(featureCount) + 1).toString());
-      if (featureCount === this.totalFeatureCount) process.stderr.write('10]\n');
-    };
-
-    const convertAndWriteFeature = async (feature: EsriFeatureType): Promise<void> => {
-      const geometry = await convertGeometry(feature.geometry);
-      if (!geometry) return;
-
-      const geojson: GeoJSON.Feature = {
-        type: "Feature",
-        properties: feature.attributes,
-        geometry: geometry
-      };
-
-      const dbHash = calculateHash(geojson);
-      if (isNewFeature(dbHash)) {
-        writeFeature(geojson);
-        showProgress();
+    const dedupe = Boolean((options as any).dedupe);
+    // Build an async iterable that yields only new (de-duplicated when enabled) features
+    const self = this;
+    async function* items(): AsyncIterable<GeoJSON.Feature> {
+      for (const feature of features) {
+        const geometry = convertGeometry(feature.geometry);
+        const geojson: GeoJSON.Feature = {
+          type: 'Feature',
+          properties: feature.attributes,
+          geometry: geometry ?? null,
+        };
+        if (dedupe) {
+          const dbHash = calculateHash(geojson);
+          if (isNewFeature(dbHash)) yield geojson;
+        } else {
+          yield geojson;
+        }
       }
-    };
-
-    if (options.format === 'esrijson') {
-      (writer as Stdout | File).writeString(JSON.stringify(features));
-    } else {
-      const conversionPromises = features.map(feature => convertAndWriteFeature(feature));
-      await Promise.all(conversionPromises);
     }
 
-    writer.save();
+    // Use writer.writeBatch so batch-capable writers can optimize buffering/flush
+    const accepted = await writer.writeBatch(items());
+
+    // Update our counters and progress for *accepted* features
+    if (typeof accepted === 'number' && accepted > 0) {
+      runtimeParams.featureCount += accepted;
+    }
+    if ((writer as any).status?.terminated) {
+      this.requestStop('max-records');
+    }
   }
 
   startQuery() {
-    const getQueryToolClass = () => {
-      switch (this.options.method) {
-        case 'geographic': return GeographicQueryTool;
-        default: return PaginatedQueryTool;
+    const rawBbox = (this.options as any).bbox;
+    const bbox = Array.isArray(rawBbox)
+      ? (rawBbox as [number, number, number, number])
+      : (typeof rawBbox === 'string'
+        ? (() => {
+            const parts = rawBbox.split(',').map((x: string) => Number(x.trim()));
+            return (parts.length === 4 && parts.every(Number.isFinite)) ? parts as [number, number, number, number] : undefined;
+          })()
+        : undefined);
+    const bboxWkidRaw = (this.options as any)['bbox-wkid'] ?? (this.options as any).bboxWkid;
+    const bboxWkid = Number.isFinite(Number(bboxWkidRaw)) ? Number(bboxWkidRaw) : undefined;
+    const oidField = String(
+      (this.sourceInfo as any)?.objectIdFieldName ??
+      (this.sourceInfo as any)?.objectIdField ??
+      ''
+    ).trim() || undefined;
+    this.whereObj.outFields = ensureRequiredOutField(this.whereObj.outFields, oidField);
+    const makeOptions = () => ({
+      maxErrors: MAX_ALLOWED_ERRORS,
+      maxFeaturesPerRequest: this.options['feature-count'],
+      queryObjectBase: this.whereObj,
+      baseUrl: new URL(this.url),
+      progress: this.options.progress,
+      totalCount: this.totalFeatureCount,
+      oidStart: (this.options as any)['oid-start'],
+      oidConcurrency: (this.options as any)['oid-concurrency'],
+      idListThreshold: (this.options as any)['id-list-threshold'],
+      oidWindow: (this.options as any)['oid-window'],
+      oidField,
+      bbox,
+      bboxWkid,
+    });
+
+    let lastRetriesPrinted = 0;
+    const wire = (tool: any) => {
+      if (this.options.progress) {
+        try {
+          tool.on('metrics', (m: any) => {
+            try {
+              const r = Number(m?.totalRetries || 0);
+              if (r > lastRetriesPrinted) {
+                lastRetriesPrinted = r;
+                const b = Number(m?.totalBackoffMs || 0);
+                process.stderr.write(`[net] retries=${r}, backoff≈${Math.round(b)}ms\n`);
+              }
+            } catch {}
+          });
+        } catch {}
       }
+      tool.on('data', (data: ArcGIS.Feature[]) => {
+        if (this._stopRequested || this._writeError) {
+          try { tool.cancel(); } catch {}
+          return;
+        }
+        const p = this.writeBatchFromArcgis(data as any);
+        // Chain sequentially to avoid unbounded promise arrays.
+        this._lastWrite = this._lastWrite.then(() => p).catch((err: any) => {
+          this._writeError = err instanceof Error ? err : new Error(String(err));
+          this.requestStop('write-error');
+          throw this._writeError;
+        });
+      });
+      tool.on('message', (message: string | string[]) => {
+        const formattedMessage = Array.isArray(message) ? message.join(' ') : message;
+        if (this.options.progress) process.stderr.write(formattedMessage);
+      });
+      // 'metrics' listener added when progress enabled
     };
 
-    const QueryTool = getQueryToolClass();
+    const runTool = async () => {
+      // OID chunk strategy only
+      const oids = new OidChunkQueryTool(makeOptions() as any);
+      this._activeTool = oids;
+      wire(oids);
+      try {
+        await oids.runQuery();
+      } catch (err) {
+        if (this._writeError) throw this._writeError;
+        if (this._stopRequested && this._stopReason === 'max-records') return;
+        throw err;
+      } finally {
+        this._activeTool = null;
+      }
+      return;
+    };
 
     return new Promise<void>((resolve, reject) => {
-      const queryTool = new QueryTool({
-        maxErrors: MAX_ALLOWED_ERRORS,
-        maxFeaturesPerRequest: this.options['feature-count'],
-        queryObjectBase: this.whereObj,
-        baseUrl: new URL(this.url),
-      });
-
-      queryTool.on('data', (data: ArcGIS.Feature[]) => {
-        this.write(data);
-      });
-
-      queryTool.on('message', (message: string | string[]) => {
-        const formattedMessage = Array.isArray(message) ? message.join(' ') : message;
-        if (this.options.progress) {
-          process.stderr.write(formattedMessage);
-        }
-      });
-
-      queryTool.on('done', resolve);
-      queryTool.on('error', reject);
-
-      queryTool.runQuery();
+      runTool().then(() => resolve()).catch(reject);
     });
   }
 }

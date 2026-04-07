@@ -1,7 +1,7 @@
-import Gpkg from './Gpkg';
+import Gpkg from './Gpkg.js';
 import { describe, expect, test, beforeAll, afterAll } from '@jest/globals';
-import { CliBaseOptionsType, CliSqlOptionsType, CliGeoJsonOptionsType } from '..';
-import { EsriFeatureLayerType } from '../helpers/esri-rest-types';
+import type { CliBaseOptionsType, CliSqlOptionsType, CliGeoJsonOptionsType } from '../cli.js';
+import type { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
 
 const options = {
     output: ':memory:',
@@ -18,14 +18,13 @@ const sourceInfo = {
 describe('SqliteDb', () => {
     let gpkg: Gpkg;
 
-    beforeAll(() => {
-        // Create an instance of the SqliteDb class before running the tests
+    beforeAll(async () => {
         gpkg = new Gpkg(options, sourceInfo);
+        await gpkg.open();
     });
 
-    afterAll(() => {
-        // Close the database connection and delete the test database file after running the tests
-        gpkg.close();
+    afterAll(async () => {
+        await gpkg.close();
     });
 
     test('should load the database', () => {
@@ -72,16 +71,17 @@ describe('SqliteDb', () => {
 
 describe('Gpkg', () => {
 
-    test('should open and close without errors', () => {
+    test('should open and close without errors', async () => {
         const gpkg = new Gpkg(options, sourceInfo);
-
+        await gpkg.open();
         expect(gpkg.db.open).toEqual(true);
-        gpkg.close();
+        await gpkg.close();
         expect(gpkg.db.open).toEqual(false);
     });
 
-    test('should contain required tables', () => {
+    test('should contain required tables', async () => {
         const gpkg = new Gpkg(options, sourceInfo);
+        await gpkg.open();
         expect(gpkg.db.open).toEqual(true);
 
         const requiredTables = [
@@ -94,12 +94,14 @@ describe('Gpkg', () => {
             'gpkg_contents',
             'layer_styles',
             (options as any)['layer-name']
-        ]
+        ];
 
-        const hasTableStatement = gpkg.db.prepare(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=@tableName;`);
+        const hasTableStatement = gpkg.db.prepare(`SELECT count(*) AS c FROM sqlite_master WHERE type='table' AND name=@tableName;`);
         requiredTables.forEach(tableName => {
-            const hasTable = hasTableStatement.get({ tableName });
-            expect(hasTable).toEqual({ 'count(*)': 1 });
+            const row = hasTableStatement.get({ tableName });
+            expect(row).toEqual({ c: 1 });
         });
+
+        await gpkg.close();
     });
 });

@@ -1,5 +1,6 @@
 import { Geometry } from 'arcgis-rest-api';
 import { Long as LongType } from 'protobufjs';
+// LongType is used for 64-bit integer values in protobuf fields
 
 export type ArcGISFeatureType = {
     geometry: Geometry,
@@ -30,12 +31,13 @@ export type FieldType = {
 };
 
 export type FeatureType = {
-    attributes: Array<{ [key: string]: any }>;
-    centroid?: any;
-    compressed_geometry: string;
-    geometry: { lengths: number[], coords: LongType[] };
-    length: number;
-    shapeBuffer?: any;
+  attributes: ValueType[];                         // Value[] with optional index
+  geometry?: GeometryTypePBF;                      // oneof compressed_geometry → geometry
+  shapeBuffer?: EsriShapeBufferType;               // oneof compressed_geometry → shapeBuffer
+  curveGeometry?: CurveGeometryType;               // oneof compressed_geometry → curveGeometry
+  centroid?: GeometryTypePBF;
+  aggregateGeometries?: GeometryTypePBF[];
+  envelope?: EnvelopeType;
 };
 
 export type SpatialReferenceType = {
@@ -68,6 +70,7 @@ export enum GeometryTypeEnum {
     esriGeometryTypePolyline = 2,
     esriGeometryTypePolygon = 3,
     esriGeometryTypeMultipatch = 4,
+    esriGeometryTypeEnvelope = 5,
     esriGeometryTypeNone = 127
 }
 
@@ -84,7 +87,11 @@ export enum FieldTypeEnum {
     esriFieldTypeRaster = 9,
     esriFieldTypeGUID = 10,
     esriFieldTypeGlobalID = 11,
-    esriFieldTypeXML = 12
+    esriFieldTypeXML = 12,
+    esriFieldTypeBigInteger = 13,
+    esriFieldTypeDateOnly = 14,
+    esriFieldTypeTimeOnly = 15,
+    esriFieldTypeTimestampOffset = 16
 }
 
 export enum SQLTypeEnum {
@@ -113,7 +120,8 @@ export enum SQLTypeEnum {
     sqlTypeTimestamp2 = 22,
     sqlTypeTinyInt = 23,
     sqlTypeVarbinary = 24,
-    sqlTypeVarchar = 25
+    sqlTypeVarchar = 25,
+    sqlTypeTimestampWithTimezone = 26
 }
 
 export enum QuantizeOriginPostionEnum {
@@ -121,24 +129,74 @@ export enum QuantizeOriginPostionEnum {
     lowerLeft = 1
 }
 
+// Low-level PBF types for geometry and attributes
+
+export enum SegmentTypeEnum { line = 0, arc = 1, bezier = 2, ellipticArc = 3 }
+
+export type EnvelopeType = {
+  XMin: number;
+  YMin: number;
+  XMax: number;
+  YMax: number;
+  SpatialReference?: SpatialReferenceType;
+};
+
+export type GeometryTypePBF = {
+  geometryType: GeometryTypeEnum;
+  lengths?: number[];         // packed uint32
+  coords?: LongType[];        // packed sint64 (delta-encoded)
+  ids?: number[];             // packed sint32
+};
+
+export type SegmentSetType = {
+  type: SegmentTypeEnum;      // segment kind
+  count: number;              // number of segments
+  parameters?: number[];      // per-segment params
+};
+
+export type CurveGeometryType = {
+  geometryType: GeometryTypeEnum;
+  parts?: number[];           // part lengths
+  segmentSets?: SegmentSetType[];
+  coords?: LongType[];        // packed sint64 (delta-encoded)
+};
+
+export type EsriShapeBufferType = { bytes: Uint8Array };
+
+export type ValueType = {
+  // exactly one (proto oneof); model as union-y bag in TS
+  string_value?: string;
+  float_value?: number;
+  double_value?: number;
+  sint_value?: number;
+  uint_value?: number;
+  int64_value?: LongType | string;   // may exceed 2^53-1
+  uint64_value?: LongType | string;
+  sint64_value?: LongType | string;
+  bool_value?: boolean;
+  null_value?: boolean;
+  index?: number;                    // maps to field position
+};
+
 export type FeatureCollectionType = {
     queryResult: {
         featureResult: {
             fields: Array<FieldType>,
+            geometryFields?: Array<{ field: FieldType; geometryType: GeometryTypeEnum }>,
             values: Array<any>,
             features: Array<FeatureType>,
             objectIdFieldName?: string,
+            uniqueIdField?: UniqueIdFieldType,
             globalIdFieldName?: string,
             geohashFieldName?: string,
+            geometryProperties?: GeometryPropertiesType,
+            serverGens?: ServerGensType,
+            geometryType?: GeometryTypeEnum,
+            spatialReference?: SpatialReferenceType,
             exceededTransferLimit?: boolean,
             hasZ?: boolean,
             hasM?: boolean,
 
-            geometryType?: GeometryTypeEnum,
-            uniqueIdField?: UniqueIdFieldType,
-            geometryProperties?: GeometryPropertiesType,
-            serverGens?: ServerGensType,
-            spatialReference?: SpatialReferenceType,
             transform?: {
                 quantizeOriginPostion?: QuantizeOriginPostionEnum,
                 scale: {

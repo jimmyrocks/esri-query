@@ -1,86 +1,63 @@
-import { Feature, Geometry } from 'geojson';
-import { CliGeoJsonOptionsType, CliBaseOptionsType } from '..';
-import Writer from './Writer.js';
+import type { Feature, Geometry } from 'geojson';
+import type { CliGeoJsonOptionsType, CliBaseOptionsType } from '../cli.js';
+import StreamWriter from './StreamWriter.js';
 
 /**
- * Stdout is a Writer implementation that writes output to the console.
- * The format is geojson or geojsonseq.
+ * Stdout writer: emits to process.stdout.
+ * Batching and framing (GeoJSON vs NDJSON) are handled by the base Writer.
  */
-export default class Stdout extends Writer {
-  strings = {
-    header: '{"type": "FeatureCollection", "features": [',
-    footer: ']}',
-    bboxFooter: '], "bbox":{bbox}}',
-    delimiter: ','
-  };
-  headerStatus = {
-    hasHeader: false,
-    hasFooter: false,
-    closed: false,
-  }
-  declare options: CliBaseOptionsType & CliGeoJsonOptionsType
+export default class Stdout extends StreamWriter {
+  declare options: CliBaseOptionsType & CliGeoJsonOptionsType;
 
-  open() {
-    if (this.options.format === 'geojsonseq') {
-      this.strings.header = this.strings.footer = this.strings.bboxFooter = null;
-      this.strings.delimiter = '\n';
-    } else if (this.options.format === 'esrijson') {
-      this.strings.header = null;
+  async open(): Promise<void> {
+    // Let CLI/config tune base-class debounced batching if desired.
+    // (Defaults are set in Writer; override here if options provided.)
+    const anyOpts: any = this.options || {};
+    if (anyOpts.batch || anyOpts.batchDebounceMs != null || anyOpts.batchMax != null || anyOpts.batchMaxBytes != null) {
+      this.enableDebouncedBatching({
+        debounceMs: Number.isFinite(anyOpts.batchDebounceMs) ? anyOpts.batchDebounceMs : undefined,
+        maxBatch: Number.isFinite(anyOpts.batchMax) ? anyOpts.batchMax : undefined,
+        maxBufferBytes: Number.isFinite(anyOpts.batchMaxBytes) ? anyOpts.batchMaxBytes : undefined,
+      });
     }
-    if (!this.headerStatus.hasHeader) {
-      this.writeHeader();
+
+    // Ensure emission mode matches the CLI format
+    const fmt = (anyOpts?.format ?? '').toLowerCase();
+    if (fmt === 'geojsonseq' || fmt === 'ndjson') {
+      this.setEmissionMode('ndjson');
+    } else {
+      this.setEmissionMode('geojson');
     }
+
+    // Bind to stdout stream
+    this.stream = process.stdout as any;
+    // Mark open and emit header if needed.
+    await this.onOpen();
   }
 
-  close() {
-    this.writeFooter();
+  async close(): Promise<void> {
+    // Base will flush any pending debounced batch and emit footer if needed.
+    await this.onClose();
   }
 
   /**
-    * Writes a string to the console.
-    * @param line The string to write.
-    */
-  writeString(line: string) {
-    process.stdout.write(line);
-  };
+   * Process one feature: base class updates counters/bbox.
+   * Then use base-class emission (which will batch/debounce as configured).
+   */
+  async writeFeature(line: Feature<Geometry, { [name: string]: any }>): Promise<Feature<Geometry, { [name: string]: any }>> {
+    try {
+      line = await super.writeFeature(line);
+    } catch (e: any) {
+      if (e && e.code === 'SKIP_FEATURE') {
+        this.status.skipped += 1;
+        return line;
+      }
+      throw e;
+    }
 
-  /**
- * Writes a GeoJSON feature to the console.
- * @param line The GeoJSON feature to write.
- * @returns The same feature that was written.
- */
-  writeFeature(line: Feature<Geometry, { [name: string]: any; }>): Feature<Geometry, { [name: string]: any; }> {
-    line = super.writeFeature(line);
-    const lineStr = JSON.stringify(line, null, this.options.pretty ? 2 : 0);
-    if (this.status.records > 1) this.writeString(this.strings.delimiter);
-    this.writeString(lineStr);
+    await this.emitFeature(line);
     return line;
   }
 
-  writeHeader() {
-    const { hasHeader, closed } = this.headerStatus;
-    if (this.status.records === 0 && !hasHeader && !closed && this.strings['header']) {
-      this.writeString(this.strings.header);
-    } else if (hasHeader) {
-      throw new Error('Header already added');
-    }
-    this.headerStatus.hasHeader = true;
-    this.status.canWrite = true;
-  }
-
-  writeFooter() {
-    const { hasFooter, hasHeader, closed } = this.headerStatus;
-    const { bboxFooter, footer } = this.strings;
-    if (footer === null || bboxFooter === null) return;
-
-    let thisFooter = this.options['no-bbox'] ? footer : bboxFooter.replace('{bbox}', JSON.stringify(this.status.bbox));
-    if (hasHeader && !hasFooter && !closed) {
-      this.writeString(thisFooter);
-    } else {
-      throw new Error(hasFooter ? 'Footer already added' : 'No header exists');
-    }
-    this.headerStatus.hasFooter = true;
-    this.status.canWrite = false;
-  }
-
-};
+  // sinkWrite is provided by StreamWriter
+}

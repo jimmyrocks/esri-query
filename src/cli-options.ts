@@ -38,6 +38,7 @@ export const optionDefinitions: OptionDef[] = [
   { name: 'token', type: String, description: 'ArcGIS token for secured services', group: 'base' },
   { name: 'oid-start', type: Number, description: 'OID strategy: starting slice size (default 250)', group: 'base' },
   { name: 'oid-concurrency', type: Number, description: 'OID strategy: number of parallel slice workers (default 2)', group: 'base' },
+  { name: 'oid-field', type: String, description: 'Object ID field override when service metadata is missing or wrong', group: 'base' },
   { name: 'id-list-threshold', type: Number, description: 'Switch to OID range scanning when total exceeds this (default 500000)', group: 'base' },
   { name: 'oid-window', type: Number, description: 'OID range scan initial window size (default 5000)', group: 'base' },
   { name: 'format', alias: 't', type: String, description: 'Output format (geojson, esrijson, geojsonseq, gpkg, flatgeobuf, geoparquet)', group: 'base' },
@@ -102,6 +103,8 @@ export const jobSchema = z.object({
   token: z.string().optional(),
   header: z.union([z.string(), z.array(z.string())]).optional(),
   headers: z.union([z.string(), z.array(z.string()), z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))]).optional(),
+  'oid-field': z.string().optional(),
+  oidField: z.string().optional(),
   'oid-start': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'oid-concurrency': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'id-list-threshold': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
@@ -125,6 +128,8 @@ export type CliBaseOptionsType = {
   'on-invalid'?: 'throw' | 'keep' | 'skip';
   'progress-every'?: number;
   'bbox-wkid'?: number;
+  'oid-field'?: string;
+  oidField?: string;
   help?: boolean;
   header?: string | string[];
   headers?: string | string[] | Record<string, string | number | boolean>;

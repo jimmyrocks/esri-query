@@ -135,6 +135,33 @@ describe('EsriQuery.startQuery', () => {
     });
   });
 
+  test('uses oid-field override when source metadata lacks objectIdField', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      'out-fields': 'name',
+      'oid-field': 'MY_OID',
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { geometryType: 'esriGeometryPoint' } as any;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.startQuery();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].oidField).toBe('MY_OID');
+    expect(captured[0].queryObjectBase.outFields).toBe('name,MY_OID');
+  });
+
   test('creates a resume state file and forces deterministic OID mode for geojsonseq', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
     const outputPath = join(tempDir, 'out.geojsonl');
@@ -217,5 +244,39 @@ describe('EsriQuery.startQuery', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].resumeAfterOid).toBe(123);
     expect(captured[0].oidConcurrency).toBe(1);
+  });
+
+  test('allows resume mode with oid-field override when metadata is missing the object ID field', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+      'oid-field': 'MY_OID',
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(captured).toHaveLength(1);
+    expect(captured[0].oidField).toBe('MY_OID');
+    expect(state.oidField).toBe('MY_OID');
   });
 });

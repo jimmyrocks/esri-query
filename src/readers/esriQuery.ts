@@ -81,6 +81,8 @@ export type EsriQueryOptions = {
   header?: string | string[];
   headers?: string | string[] | Record<string, string | number | boolean>;
   'resume-state'?: string;
+  'oid-field'?: string;
+  oidField?: string;
 };
 
 type ResumeState = {
@@ -186,6 +188,17 @@ export default class EsriQuery {
     };
   }
 
+  private resolveOidField(source?: Partial<EsriFeatureLayerType> | Record<string, unknown>): string | undefined {
+    const configured = String((this.options as any)['oid-field'] ?? (this.options as any).oidField ?? '').trim();
+    if (configured) return configured;
+    const inferred = String(
+      (source as any)?.objectIdFieldName ??
+      (source as any)?.objectIdField ??
+      ''
+    ).trim();
+    return inferred || undefined;
+  }
+
   private buildResumeState(oidField: string, base?: Partial<ResumeState>): ResumeState {
     return {
       version: 1,
@@ -224,13 +237,9 @@ export default class EsriQuery {
       throw new Error('--resume-state does not support partitioned output.');
     }
 
-    const oidField = String(
-      (this.sourceInfo as any)?.objectIdFieldName ??
-      (this.sourceInfo as any)?.objectIdField ??
-      ''
-    ).trim();
+    const oidField = this.resolveOidField(this.sourceInfo);
     if (!oidField) {
-      throw new Error('Cannot enable resume mode: object ID field is unavailable.');
+      throw new Error('Cannot enable resume mode: object ID field is unavailable. Pass --oid-field FIELDNAME.');
     }
     this.resumeOidField = oidField;
 
@@ -351,7 +360,7 @@ export default class EsriQuery {
     }, {});
 
     // Keep OID available even when users narrow outFields.
-    const objectIdField = String((source as any).objectIdFieldName ?? (source as any).objectIdField ?? '').trim() || undefined;
+    const objectIdField = this.resolveOidField(source);
     this.whereObj.outFields = ensureRequiredOutField(this.whereObj.outFields, objectIdField);
 
     // No-op: offset pagination removed; ordering hints are unnecessary now.
@@ -617,11 +626,7 @@ export default class EsriQuery {
         : undefined);
     const bboxWkidRaw = (this.options as any)['bbox-wkid'] ?? (this.options as any).bboxWkid;
     const bboxWkid = Number.isFinite(Number(bboxWkidRaw)) ? Number(bboxWkidRaw) : undefined;
-    const oidField = String(
-      (this.sourceInfo as any)?.objectIdFieldName ??
-      (this.sourceInfo as any)?.objectIdField ??
-      ''
-    ).trim() || undefined;
+    const oidField = this.resolveOidField(this.sourceInfo);
     this.whereObj.outFields = ensureRequiredOutField(this.whereObj.outFields, oidField);
     const makeOptions = () => ({
       maxErrors: MAX_ALLOWED_ERRORS,

@@ -90,6 +90,19 @@ esri-query \
 
 If the cookie expires mid-run, update the `Cookie` header and rerun the same command. `esri-query` will read `out.resume.json`, append to `out.geojsonl`, and continue after the last committed OID.
 
+If resume mode says the object ID field is unavailable, supply it explicitly with `--oid-field`:
+
+```bash
+esri-query \
+  -u <layer-url> \
+  -W "1=1" \
+  -t geojsonseq \
+  -o out.geojsonl \
+  --resume-state out.resume.json \
+  --oid-field OBJECTID \
+  --header "Cookie: SESSION=abc123"
+```
+
 After a failure:
 1. Do not delete `out.geojsonl` or `out.resume.json`.
 2. If the session expired, replace the cookie value in `--header "Cookie: ..."` or in your YAML `headers.Cookie`.
@@ -148,6 +161,7 @@ Query behavior:
 - `--json` (bool): Force JSON; disables PBF.
 - `--token` (string): ArcGIS token for secured services.
 - `--header` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
+- `--oid-field` (string): Object ID field override when the service metadata is missing or wrong.
 - `--resume-state` (string): JSON checkpoint file for resumable `geojsonseq` exports.
 - `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
 - `--out-fields, -F` (string): Comma-separated attribute fields to request (defaults to `*`).

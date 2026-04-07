@@ -1,22 +1,40 @@
 {
     "compilerOptions": {
-        "module": "es2020",
-        "moduleResolution": "Node",
+        "module": "NodeNext",
+        "moduleResolution": "nodenext",
         "esModuleInterop": true,
         "allowSyntheticDefaultImports": true,
-        "target": "ESNext",
+        "isolatedModules": true,
+        "target": "ES2022",
+        "declaration": true,
+        "declarationMap": true,
+        "resolveJsonModule": true,
+        "types": [
+            "node"
+        ],
         "noImplicitAny": true,
         "skipLibCheck": true,
         "sourceMap": false,
         "outDir": "dist",
+        "rootDir": "src",
         "baseUrl": ".",
         "paths": {
+            "better-sqlite3": [
+                "node_modules/@types/better-sqlite3"
+            ],
             "*": [
-                "node_modules/*"            ]
+                "node_modules/*"
+            ]
         }
     },
     "include": [
-        "src/**/*"
+        "src/**/*.ts"
+    ],
+    "exclude": [
+        "dist",
+        "test",
+        "src/**/*.unit.test.ts",
+        "src/**/*.int.test.ts"
     ],
     "typedocOptions": {
         "entryPoints": [

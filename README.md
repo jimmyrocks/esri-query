@@ -1,135 +1,268 @@
+## Overview
 
-# esri-query
+esri-query is a lean, resilient extractor for ArcGIS REST Feature/Map Services. It favors a robust OID-chunk strategy (with automatic range scan fallback) and streams results to common geospatial formats:
 
-`esri-query` is a command-line tool that extracts data from ESRI REST endpoints when nothing else will.
+- GeoJSON / GeoJSONSeq (NDJSON)
+- GeoPackage (GPKG)
+- FlatGeobuf (FGB)
+- GeoParquet
 
-## Table of Contents
+Under the hood it uses proven libraries for flow control and resilience (Bottleneck, Cockatiel), and a custom PBF decoder focused on correctness and speed.
 
--   [Installation](#installation)
--   [Usage](#usage)
--   [Options](#options)
--   [Testing](#testing)
--   [Formats](#formats)
-    -   Input
-        -   [ESRI Protobuf](#esri-protobuf-pbf)
-        -   [ESRI JSON](#esri-json)
-    -   Output
-        -   [GeoJSON](#geojson)
-        -   [GeoJSONSeq](#geojsonseq)
-        -   [GeoPackage](#geopackage)
+Highlights:
+- OID-chunk by default (fast, duplicate-free, order independent)
+- Parallel slice fetching with adaptive sizing
+- Optional PBF with robust fallback to JSON
+- Streaming writers with backpressure
+- Token support for secured services
 
+## Install
 
+Build and run from source:
 
-## Installation
-
-To install `esri-query`, you need to have [Node.js](https://nodejs.org/en/download) installed.
-
-You will then need to build it:
-
-```bash
-git clone https://github.com/jimmyrocks/esri-query.git
-cd ./esri-query
+```
+npm install
 npm run build
 ```
 
-## Usage
+Runtime requirements:
+- Node.js 20 or newer.
 
-To use `esri-query`, run the following command in your terminal:
+Use the CLI directly:
 
+```
+node ./dist/cli.js --help
+```
 
-```bash
-esri-query --url <URL>
-``` 
+Or link globally during development:
 
-The `<URL>` should be the URL of the ESRI REST endpoint, for example `https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2`.
+```
+npm link
+esri-query --help
+```
 
-By default, the output is printed to the console in GeoJSON format. You can specify other options using flags, as shown in the [Options](#options) section.
+## Quick Start
 
-## Options
+Export to GeoJSONSeq (NDJSON):
 
-| Flag | Description                                                                                         |
-| ------------------------| --------------------------------------------------------------------------------------------------- |
-| -h, --help               | Display this usage guide.                                                                           |
-| -u, --url <url>          | The URL of the ESRI Rest Endpoint. MapServer or Feature Server (ex. https://.../FeatureServer/0)                                 |
-| -w, --where string       | ESRI Style Where (Defaults to 1=1)                                                                  |
-| -f, --format string      | [gpkg, geojson, geojsonseq]                                                                         |
-| -o, --output string      | The file to write out (if set, type becomes file)                                                  |
-| -y, --pretty             | Pretty Print JSON (geojsonseq will override this)                                              |
-| -c, --feature-count num  | Features per query, reduce this number if you're seeing a lot of bad requests from the server (Default is server default)                                                     |
-| -j, --json               | Use ESRI json to download data (otherwise it will try to use the [esri protobuf](https://github.com/Esri/arcgis-pbf/tree/main/proto/FeatureCollection) format)                  |
-| -p, --progress           | Show progress during the process                                                                   |
-| -l, --layer-name         | For GPKG files, specifies the layer-name, if unset, it will use the filename                        |
-| -b, --no-bbox            | Does not calculate a bbox for each feature. (Bboxs are slower to generate, but may speed up calculations on the resulting file) |
+```
+esri-query -u <layer-url> -W "1=1" -t geojsonseq -o out.geojsonl -p
+```
 
-### Examples
+Write a GeoPackage:
 
-#### Simplest GeoJSON Example
+```
+esri-query -u <layer-url> -W "1=1" -t gpkg -o data.gpkg -p
+```
 
-```bash
-npm run start -- --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2"
-``` 
+Force JSON (disable PBF) when debugging:
 
-#### to GeoJSONSeq File Example
+```
+esri-query -u <layer-url> -W "1=1" --json -t gpkg -o data.gpkg
+```
 
-GeoJSONSeq allows parallel processing in Tippecanoe
+Use a token for secured services:
+
+```
+esri-query -u <layer-url> -W "1=1" --token "$ARCGIS_TOKEN" -t geoparquet -o data.parquet
+```
+
+S3 output (GeoParquet, FlatGeobuf):
+
+```
+esri-query -u <layer-url> -W "1=1" -t geoparquet -o s3://my-bucket/path/data.parquet -p
+```
+
+Notes:
+- Install AWS SDK deps: `npm i @aws-sdk/client-s3 @aws-sdk/lib-storage`.
+- Configure AWS via env (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`).
+- For S3-compatible endpoints (MinIO, etc.), set `AWS_S3_ENDPOINT` and `AWS_S3_FORCE_PATH_STYLE=1`.
+- FlatGeobuf writes partitioned parts; `-o s3://bucket/prefix/` uploads part objects to that prefix.
+- Optional flags: `--s3-acl` (private, public-read, bucket-owner-full-control), `--s3-storage-class` (STANDARD, INTELLIGENT_TIERING, GLACIER, etc.), `--s3-sse` (AES256 or aws:kms), `--s3-ssekms-key-id` (when using KMS).
+ - URL params also work to keep the CLI small:
+   - `s3://bucket/key.parquet?acl=public-read&storageClass=INTELLIGENT_TIERING&sse=AES256`
+   - CLI flags override URL params when both are provided.
+
+You can also set these in YAML using the equivalent option keys (e.g., `s3-acl: private`).
+ - To avoid many flags, you can encode S3 options in the URL query:
+   - `s3://bucket/key.parquet?acl=public-read&storageClass=INTELLIGENT_TIERING&sse=AES256`
+   - `s3://bucket/key.gpkg?sse=aws:kms&ssekmsKeyId=arn:aws:kms:...`
+   URL params take effect unless overridden by CLI flags.
+ - You can also put these options in a YAML config via `--config` to keep CLI short.
+
+## Options Reference (CLI and YAML)
+
+All options are available on the command line and in YAML/JSON config files. CLI flags map 1:1 to YAML keys (kebab-case stays kebab-case).
+
+Required:
+- `--url, -u` (string): ArcGIS layer URL.
+- `--where, -W` (string): Where clause (e.g., `1=1`).
+
+ Output:
+- `--format, -t` (geojson | esrijson | geojsonseq | gpkg | flatgeobuf | geoparquet)
+- `--output, -o` (path or s3 URL like `s3://bucket/key`)
+- `--overwrite, -y` (bool): Overwrite existing files.
+
+Query behavior:
+- `--json` (bool): Force JSON; disables PBF.
+- `--token` (string): ArcGIS token for secured services.
+- `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
+- `--out-fields, -F` (string): Comma-separated attribute fields to request (defaults to `*`).
+- `--progress, -p` (bool): Show progress, ETA, retries/backoff.
+- `--progress-every, -P` (number): Emit progress tick every N accepted features.
+- `--max-records, -R` (number): Soft cap on accepted features.
+- `--on-invalid, -I` (throw | keep | skip): Handling for malformed geometry.
+- `--strict-geometry, -G` (bool): If false, tolerate malformed geometries.
+- `--antimeridian-aware, -A` (bool): Enable dateline-aware bbox when WKID 4326.
+- `--dedupe, -D` (bool): De-duplicate by hashing (memory heavy; off by default).
+
+OID strategy knobs:
+- `--oid-start` (number): Starting slice size (default 250).
+- `--oid-concurrency` (number): Parallel slice workers (default 2).
+- `--id-list-threshold` (number): Switch to OID range scan when total exceeds this (default 500000).
+- `--oid-window` (number): Initial OID range scan window size (default 5000).
+
+GeoParquet:
+- `--parquetScanRows, -S` (number): Schema lookahead rows (default 1000).
+- `--no-bbox` (bool): Disable per-feature bbox columns and file-level bbox metadata.
+- `--geometry-column-name` (string): Geometry column name (default `geometry`).
+- `--bbox-3d` (bool): Include `zmin`/`zmax` fields in the `bbox` group when 3D is detected (or force on).
+- `--parquetRowGroupSize` (number): Target row group size in rows (improves page/row-group stats and pruning).
+
+Config files:
+- `--config, -C` (path[, path...]): One or more YAML/JSON files; merged with CLI options.
+
+YAML example:
+
+```
+options:
+  progress: true
+  json: false
+  token: ${ARCGIS_TOKEN}
+  oid-start: 250
+  oid-concurrency: 2
+  id-list-threshold: 500000
+  oid-window: 5000
+jobs:
+  - name: parcels
+    url: https://example.com/FeatureServer/0
+    where: 1=1
+    format: gpkg
+    output: out.gpkg
+```
+
+## How It Works
+
+- OID-chunk by default: fetch objectIds, then fetch features in adaptive slices; small parallelism (default 2) for speed without overwhelming servers.
+- Range scan fallback: for massive layers, skip the ID list; iterate OID ranges by min/max with adaptive window size.
+- Flow control & resilience: Bottleneck per-host limiter; Cockatiel retry policy + circuit breaker; timeout and backoff with jitter.
+- PBF or JSON: PBF is used when reliable; JSON is available via `--json`. The PBF decoder supports dictionary-encoded attributes and camelCase oneofs.
+- Writers: stream with backpressure; GeoParquet infers schema (lookahead) and stores geometry as WKB.
+
+## Examples
+
+FlatGeobuf:
+
+```
+esri-query -u <layer-url> -W "1=1" -t flatgeobuf -o out.fgb -p
+```
+
+GeoParquet:
+
+```
+esri-query -u <layer-url> -W "1=1" -t geoparquet -o out.parquet -p
+```
+
+BBox filter:
+
+```
+esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojsonseq -o out.geojsonl
+```
+
+## Debugging
+
+- `DEBUG_ESRI_QUERY=1`: verbose request/retry logs.
+- `DEBUG_ESRI_QUERY_HEADERS=1`: log headers.
+- `DEBUG_ESRI_PBF=1`: one-time PBF field/palette/attribute sample.
+
+## Notes & Tips
+
+- Keep `outFields` narrow when possible (set `--out-fields` or YAML `outFields` / `out-fields`). The OID field is auto-included when a narrow list is used.
+- For heavy layers, increase `--oid-concurrency` cautiously; respect server limits.
+- Use `--json` on finicky hosts; you can also force JSON via env for specific hosts if needed.
+- Use `--dry-run` with `--print-format json` to validate configs before long exports.
+
+## New Options & Behavior
+
+- `--json`: Force JSON responses (disables PBF). Useful for debugging or services that misreport PBF support.
+- `--overwrite` (`-y`): Overwrite existing output files. Applies to GPKG, GeoParquet, FlatGeobuf, and text writers.
+- `--parquetScanRows`: GeoParquet schema lookahead rows (default 1000) to infer column types (numbers/booleans/timestamps).
+- `--dedupe`: Opt-in feature de-duplication by hashing. Beware of memory on very large layers.
+- `--token`: ArcGIS token for secured services (added to all requests).
+- `--out-fields` (`-F`): Request only selected attributes (`name,type,status`) instead of `*`.
+- `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
+- `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.
+- `--id-list-threshold`: If `totalCount` exceeds this, switch to OID range scanning (default 500000). Accepts YAML/JSON config.
+- `--oid-window`: Initial OID range scan window (default 5000). Accepts YAML/JSON config.
+
+Other improvements:
+- PBF decoding handles dictionary-encoded attributes and protobufjs camelCase oneofs (e.g., `uintValue`).
+- Uses OID-chunk strategy by default (most reliable). Offset/geographic pagination support has been removed.
+- Enhanced `--progress` shows periodic rate, ETA, and retry/backoff snapshots.
+
+Debugging:
+- `DEBUG_ESRI_QUERY=1` for verbose request/retry info.
+- `DEBUG_ESRI_PBF=1` to print one-time PBF field/palette/attribute samples.
+
+## FlatGeobuf Example
+
+Specify `--format flatgeobuf` with an output file ending in `.fgb` to output partitioned FlatGeobuf files (e.g., `.part0.fgb`, `.part1.fgb`, etc.). If the output path is a directory, files will be written there.
 
 ```bash
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
---format geojsonseq \
---output ./example.geojsonseq
-``` 
+--format flatgeobuf \
+--output ./output.fgb
+```
 
-#### to GeoPackage File Example
+Note that `.buf` is treated as a directory unless `.fgb` is used.
 
-GeoPackages load into PostgreSQL much faster than GeoJSON or GeoJSONSeq
+## GeoParquet Example
+
+Specify `--format geoparquet` with an output file ending in `.parquet` to output GeoParquet files. If the output path is a directory, partitioned `.parquet` files will be written there (e.g., `.part0.parquet`, `.part1.parquet`).
 
 ```bash
 npm run start -- \
 --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
---format gpkg \
---output ./example.gpkg
+--format geoparquet \
+--output ./output.parquet
 ```
 
-## Testing
+Note that `.parquet` is required as the file extension for GeoParquet output.
 
-To test `esri-query`, run the following command in your terminal:
+## Bounding Box Filter Example
 
+Query features within a bounding box and specify spatial reference:
 
 ```bash
-npm run test
+npm run start -- \
+--url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2" \
+--bbox -123.5,47.5,-122.8,48.0 \
+--bbox-wkid 4326
 ```
 
-## Formats
+## Environment Variables
 
-### Input
+The tool supports the following environment variables for debugging and troubleshooting:
 
-#### ESRI Protobuf (PBF)
+- `DEBUG_ESRI_QUERY`: Prints verbose debug information for requests, retries, headers, and more.
+- `DEBUG_ESRI_QUERY_HEADERS`: Logs request and response headers.
+- `NODE_DEBUG=esri-query`: An alternate Node debug namespace for low-level logging.
 
-No, this isn't the same as [MapBox Vector Tiles Protobuf schema](https://github.com/mapbox/vector-tile-spec), although both use the same underlying [Protobuf](https://developers.google.com/protocol-buffers) format.
+These can be combined with `npm run start` or `node` commands to help diagnose issues.
 
-ESRI Protobuf format provides "zig-zag encoded" points on a quantized grid that are stored in a binary format (Google Protobuf). (You can read all about [quantization parameters](https://developers.arcgis.com/rest/services-reference/enterprise/query-feature-service-layer-.htm#ESRI_SECTION2_2E4EB59F21E44D79AB2AEF9364005896)). The format is very similar to the ESRI JSON format, which is why this library uses the [Terraformer JS](https://github.com/terraformer-js/terraformer) library under the hood to convert the Protobuf data to GeoJSON.
+Example usage with `DEBUG_ESRI_QUERY` enabled:
 
-This format is *much* faster than the ESRI JSON format, but is not compatible with all ArcGSI REST Servers/
-
-#### ESRI JSON
-
-ESRI has their own spatial format that provides some more information than standard GeoJSON. All ESRI ArcGIS REST Vector Endpoints support from form of ESRI JSON, so when PBF is not supported or a query is run with `--json`, this is the source format that is used. You can find more information about the ESRI JSON format in the [ArcGIS REST API Documentation](https://developers.arcgis.com/documentation/common-data-types/feature-object.htm).
-
-### Output
-
-#### GeoJSON
-
-[GeoJSON](https://geojson.org/) is a standard GeoSpatial format that has the most interoperability. This is the "native" geospatial format used by esri-query, so all projection conversions are done on the server.
-
-#### GeoJSONSeq
-
-This is a format creates individual GeoJSON Features into a format that is more useful for parallel processing. The features are separated by a newline (LF), which makes it [Newline Delimited JSON](https://jsonlines.org/). It is useful for [Tippecanoe](https://github.com/mapbox/tippecanoe).
-
-You can read more abot the format [on the ogr2ogr page](https://gdal.org/drivers/vector/geojsonseq.html). There is also [RS delimited version](https://datatracker.ietf.org/doc/html/rfc8142), but it's not supported by this tool since I don't have a use for it, but if you do, open an issue.
-
-#### GeoPackage
-
-[GeoPackages](https://www.geopackage.org/) are sqlite files that follow a standard for spatial data storage. In esri-query, these GeoPackage files are created with the [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) library, they do not use spatialite, and do not have a spatial index. GeoPackage uses the [Well-Known-Binary](https://en.wikipedia.org/wiki/Well-known_text_representation_of_geometry#Well-known_binary) format, so these files are very performant for importing to [PostGIS](https://postgis.net/) (which uses its own version of WKB).
-
-Since the output GeoPackages aren't spatialite files or spatially indexed, they may be a little slower in tools like [QGIS](https://qgis.org/). You can use a tool like [ogr2ogr](https://gdal.org/programs/ogr2ogr.html) or [QGIS](https://qgis.org/) to convert this GeoPackage to one with a spatial index if needed.
+```bash
+DEBUG_ESRI_QUERY=1 npm run start -- --url "https://sampleserver6.arcgisonline.com/arcgis/rest/services/LocalGovernment/Recreation/FeatureServer/2"
+```

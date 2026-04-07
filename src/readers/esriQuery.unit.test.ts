@@ -431,6 +431,36 @@ describe('EsriQuery.startQuery', () => {
     expect(readFileSync(migratedPath, 'utf8')).toBe(firstLine);
   });
 
+  test('does not mark resume state completed when the run stops early', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const originalStartQuery = query.startQuery;
+    query.startQuery = async function () {
+      (this as any).requestStop('max-records');
+    };
+
+    try {
+      await query.start();
+    } finally {
+      query.startQuery = originalStartQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.completed).toBe(false);
+  });
+
   test('warns once when dedupe tracking crosses the configured threshold', async () => {
     const query = new EsriQuery({
       url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',

@@ -17,6 +17,8 @@ const MAX_ID_LIST_HEAP_SHARE = 0.25;
  * _forceJson flag so we don't try PBF for ID lists or objectId requests.
  */
 export default class OidChunkQueryTool extends QueryToolBase {
+  private _rangeScanStarted = false;
+
   protected getApproxAvailableHeapBytes(): number | undefined {
     try {
       const heapLimit = Number(getHeapStatistics().heap_size_limit || 0);
@@ -76,11 +78,13 @@ export default class OidChunkQueryTool extends QueryToolBase {
       // Massive layers: prefer OID range scanning without materializing IDs
       const total = Number((this.options as any).totalCount || 0);
       if (this.shouldPreferRangeScan(total)) {
+        this._rangeScanStarted = false;
         try {
           await this._rangeScanByOid();
           this.emit('done');
           return;
         } catch (err: any) {
+          if (this._rangeScanStarted) throw err;
           this.log(`[oid] range scan unavailable; falling back to objectId list (${err?.message || err})`);
         }
       }
@@ -183,6 +187,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
           f: 'json',
         } as any;
         let tries = 0; let ok = false;
+        let lastErr: any;
         while (tries <= LOCAL_RETRIES && !ok) {
           try {
             const features = await this.fetchFeatures(q);
@@ -191,10 +196,16 @@ export default class OidChunkQueryTool extends QueryToolBase {
             ok = true; onSuccess(s.size);
           } catch (err: any) {
             if (this.isAbortError(err)) return;
+            lastErr = err;
             tries += 1; this.errorCount++; onFailure();
             if (this.errorCount > this.options.maxErrors) { this.emit('error', err); return; }
             if (tries > LOCAL_RETRIES) break;
           }
+        }
+        if (!ok) {
+          const err = lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'OID slice failed after retries'));
+          err.message = `${err.message} (objectIds ${ids[0]}..${ids[ids.length - 1]})`;
+          throw err;
         }
       }
     };
@@ -203,6 +214,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
 
   private async _rangeScanByOid(): Promise<void> {
     if (this.isCancelled()) return;
+    this._rangeScanStarted = false;
     const oidField = String((this.options as any).oidField ?? '').trim();
     if (!oidField) throw new Error('Could not determine OID field for range scan');
     if (this.isCancelled()) return;
@@ -235,6 +247,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
     const resumeAfterOid = Number((this.options as any).resumeAfterOid);
     let start = Number.isFinite(resumeAfterOid) ? Math.max(minOid, Math.floor(resumeAfterOid) + 1) : minOid;
+    this._rangeScanStarted = true;
     const nextRange = (): { a: number; b: number } | null => {
       if (start > maxOid) return null; const a = start; const b = Math.min(maxOid, a + window - 1); start = b + 1; return { a, b };
     };
@@ -257,16 +270,23 @@ export default class OidChunkQueryTool extends QueryToolBase {
           f: 'json',
         } as any;
         let tries = 0; let ok = false;
+        let lastErr: any;
         while (tries <= LOCAL_RETRIES && !ok) {
           try { const features = await this.fetchFeatures(q); if (features.length) this.emit('data', features as EsriFeatureType[]); ok = true; onSuccess(); }
           catch (err: any) {
             if (this.isAbortError(err)) return;
+            lastErr = err;
             tries += 1;
             this.errorCount++;
             onFailure();
             if (this.errorCount > this.options.maxErrors) { this.emit('error', err); return; }
             if (tries > LOCAL_RETRIES) break;
           }
+        }
+        if (!ok) {
+          const err = lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'OID range failed after retries'));
+          err.message = `${err.message} (${oidField} BETWEEN ${r.a} AND ${r.b})`;
+          throw err;
         }
       }
     };

@@ -179,4 +179,40 @@ describe('OidChunkQueryTool range scan', () => {
     const where = String((fetchFeaturesMock.mock.calls[0][0] as any).where || '');
     expect(where).toContain('OBJECTID BETWEEN 6 AND 10');
   });
+
+  test('aborts objectId mode when a slice exhausts local retries instead of silently skipping it', async () => {
+    const tool = makeTool({ oidField: undefined, totalCount: 4, idListThreshold: 999999, oidStart: 2, maxFeaturesPerRequest: 2 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).returnIdsOnly) {
+        return { objectIds: [1, 2, 3, 4] };
+      }
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => {
+      throw new Error('slice failed');
+    });
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await expect(tool.runQuery()).rejects.toThrow('slice failed (objectIds 1..2)');
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(3);
+  });
+
+  test('aborts range scan when a range exhausts local retries instead of silently skipping it', async () => {
+    const tool = makeTool({ oidField: 'OBJECTID', totalCount: 10, oidWindow: 5, maxFeaturesPerRequest: 5 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).outStatistics) return { statistics: [{ min: 1, max: 10 }] };
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => {
+      throw new Error('range failed');
+    });
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await expect(tool.runQuery()).rejects.toThrow('range failed (OBJECTID BETWEEN 1 AND 10)');
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(3);
+  });
 });

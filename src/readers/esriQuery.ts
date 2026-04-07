@@ -822,7 +822,7 @@ export default class EsriQuery {
         await this._lastWrite.catch(() => {});
       }
       if (this._writeError) throw this._writeError;
-      if (this.resumeState) {
+      if (this.resumeState && !this._stopRequested) {
         this.resumeState = this.buildResumeState(this.resumeState.oidField, {
           ...this.resumeState,
           ...this.getWriterResumeStatePatch(),

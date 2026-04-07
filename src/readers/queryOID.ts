@@ -65,6 +65,8 @@ export interface QueryOptions {
   bbox?: [number, number, number, number];   // [xmin, ymin, xmax, ymax]
   bboxWkid?: number;                         // optional spatial reference for bbox
   extraHeaders?: Record<string, string>;
+  resumeAfterOid?: number;                  // skip any OIDs <= this value
+  stableOidOrder?: boolean;                 // sort objectIds ascending before slicing
 }
 
 // -------------------------------

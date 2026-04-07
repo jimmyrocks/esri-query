@@ -80,6 +80,20 @@ esri-query -u <layer-url> -W "1=1" --header "Cookie: SESSION=abc123" -t geojson 
 
 If your service is secured by cookies, pass the cookie back as a `Cookie` request header. `Set-Cookie` is the response header a server sends to a client, so it is not what you pass to `esri-query`.
 
+Resume a long-running NDJSON export after refreshing an expiring cookie:
+
+```bash
+esri-query \
+  -u <layer-url> \
+  -W "1=1" \
+  -t geojsonseq \
+  -o out.geojsonl \
+  --resume-state out.resume.json \
+  --header "Cookie: SESSION=abc123"
+```
+
+If the cookie expires mid-run, update the `Cookie` header and rerun the same command. `esri-query` will read `out.resume.json`, append to `out.geojsonl`, and continue after the last committed OID.
+
 S3 output (GeoParquet, FlatGeobuf):
 
 ```
@@ -120,6 +134,7 @@ Query behavior:
 - `--json` (bool): Force JSON; disables PBF.
 - `--token` (string): ArcGIS token for secured services.
 - `--header` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
+- `--resume-state` (string): JSON checkpoint file for resumable `geojsonseq` exports.
 - `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
 - `--progress, -p` (bool): Show progress, ETA, retries/backoff.
 - `--progress-every, -P` (number): Emit progress tick every N accepted features.
@@ -155,6 +170,7 @@ options:
   headers:
     Cookie: SESSION=abc123
     X-Requested-With: esri-query
+  resume-state: out.resume.json
   oid-start: 250
   oid-concurrency: 2
   id-list-threshold: 500000
@@ -216,6 +232,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `--dedupe`: Opt-in feature de-duplication by hashing. Beware of memory on very large layers.
 - `--token`: ArcGIS token for secured services (added to all requests).
 - `--header`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
+- `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Current scope is `geojsonseq` only; reruns append to the existing NDJSON output.
 - `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
 - `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.
 - `--id-list-threshold`: If `totalCount` exceeds this, switch to OID range scanning (default 500000). Accepts YAML/JSON config.

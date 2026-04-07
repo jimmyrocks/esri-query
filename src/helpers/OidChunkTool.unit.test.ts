@@ -122,4 +122,23 @@ describe('OidChunkQueryTool range scan', () => {
 
     await expect(tool.runQuery()).rejects.toThrow('objectId list response exceeded transfer limit');
   });
+
+  test('sorts and filters objectIds when resumeAfterOid is provided', async () => {
+    const tool = makeTool({ oidField: undefined, totalCount: 5, resumeAfterOid: 4, stableOidOrder: true, idListThreshold: 999999 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).returnIdsOnly) {
+        return { objectIds: [9, 3, 7, 1, 5] };
+      }
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => []);
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await tool.runQuery();
+
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
+    expect(String((fetchFeaturesMock.mock.calls[0][0] as any).objectIds || '')).toBe('5,7,9');
+  });
 });

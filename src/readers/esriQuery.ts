@@ -3,6 +3,9 @@ import crypto from 'crypto';
 import post from '../helpers/post-async.js';
 import * as ArcGIS from 'arcgis-rest-api';
 import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-types.js';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 
 import Stdout from '../writers/Stdout.js';
 import Gpkg from '../writers/Gpkg.js';
@@ -69,6 +72,7 @@ export type EsriQueryOptions = {
   overwrite?: boolean;
   json?: boolean;
   progress?: boolean;
+  append?: boolean;
   'feature-count'?: number;
   'no-bbox'?: boolean;
   'layer-name'?: string;
@@ -76,6 +80,23 @@ export type EsriQueryOptions = {
   token?: string;
   header?: string | string[];
   headers?: string | string[] | Record<string, string | number | boolean>;
+  'resume-state'?: string;
+};
+
+type ResumeState = {
+  version: 1;
+  mode: 'geojsonseq-oid';
+  url: string;
+  queryUrl: string;
+  where: string;
+  output: string;
+  format: 'geojsonseq';
+  oidField: string;
+  totalFeatureCount?: number;
+  lastCompletedOid?: number;
+  recordsWritten?: number;
+  completed?: boolean;
+  updatedAt: string;
 };
 
 const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
@@ -120,6 +141,10 @@ export default class EsriQuery {
   private _stopRequested = false;
   private _stopReason: 'max-records' | 'write-error' | null = null;
   extraHeaders?: Record<string, string>;
+  private resumeStatePath?: string;
+  private resumeState?: ResumeState;
+  private resumeAfterOid?: number;
+  private resumeOidField?: string;
 
   constructor(options: EsriQueryOptions) {
     this.options = options;
@@ -139,6 +164,7 @@ export default class EsriQuery {
 
     const configuredOutFields = normalizeOutFields((options as any)['out-fields'] ?? (options as any).outFields);
     this.extraHeaders = parseExtraHeaders([(options as any).header, (options as any).headers]);
+    this.resumeStatePath = (options as any)['resume-state'];
 
     // Create a 'whereObj' which is the Esri Rest params defined as EsriQueryObjectType
     this.whereObj = {
@@ -149,6 +175,135 @@ export default class EsriQuery {
       'f': 'json',
       ...(options.token ? { token: options.token } : {}),
     };
+  }
+
+  private buildResumeState(oidField: string, base?: Partial<ResumeState>): ResumeState {
+    return {
+      version: 1,
+      mode: 'geojsonseq-oid',
+      url: this.url,
+      queryUrl: this.queryUrl,
+      where: this.options.where,
+      output: String(this.options.output),
+      format: 'geojsonseq',
+      oidField,
+      totalFeatureCount: this.totalFeatureCount,
+      lastCompletedOid: base?.lastCompletedOid,
+      recordsWritten: base?.recordsWritten ?? 0,
+      completed: base?.completed ?? false,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async saveResumeState(): Promise<void> {
+    if (!this.resumeStatePath || !this.resumeState) return;
+    await mkdir(dirname(this.resumeStatePath), { recursive: true });
+    const tmpPath = `${this.resumeStatePath}.tmp`;
+    await writeFile(tmpPath, JSON.stringify({ ...this.resumeState, updatedAt: new Date().toISOString() }, null, 2) + '\n', 'utf8');
+    await rename(tmpPath, this.resumeStatePath);
+  }
+
+  private async prepareResumeSupport(): Promise<void> {
+    if (!this.resumeStatePath) return;
+    if (this.options.format !== 'geojsonseq') {
+      throw new Error('--resume-state currently supports --format geojsonseq only.');
+    }
+    if (!this.options.output) {
+      throw new Error('--resume-state requires --output.');
+    }
+    if ((this.options as any).partition) {
+      throw new Error('--resume-state does not support partitioned output.');
+    }
+
+    const oidField = String(
+      (this.sourceInfo as any)?.objectIdFieldName ??
+      (this.sourceInfo as any)?.objectIdField ??
+      ''
+    ).trim();
+    if (!oidField) {
+      throw new Error('Cannot enable resume mode: object ID field is unavailable.');
+    }
+    this.resumeOidField = oidField;
+
+    const overwrite = Boolean((this.options as any).overwrite);
+    const outputExists = existsSync(String(this.options.output));
+    let loadedState: ResumeState | undefined;
+
+    if (!overwrite) {
+      try {
+        loadedState = JSON.parse(await readFile(this.resumeStatePath, 'utf8')) as ResumeState;
+      } catch (e: any) {
+        if (e?.code !== 'ENOENT') throw e;
+      }
+    }
+
+    if (!overwrite && loadedState) {
+      const expected = this.buildResumeState(oidField, loadedState);
+      const mismatches = [
+        loadedState.mode !== 'geojsonseq-oid' ? 'mode' : null,
+        loadedState.url !== expected.url ? 'url' : null,
+        loadedState.queryUrl !== expected.queryUrl ? 'queryUrl' : null,
+        loadedState.where !== expected.where ? 'where' : null,
+        loadedState.output !== expected.output ? 'output' : null,
+        loadedState.format !== expected.format ? 'format' : null,
+        loadedState.oidField !== expected.oidField ? 'oidField' : null,
+      ].filter(Boolean);
+      if (mismatches.length) {
+        throw new Error(`Resume state does not match this job (${mismatches.join(', ')}). Use --overwrite to start fresh or point to the correct state file.`);
+      }
+      if (!outputExists) {
+        throw new Error(`Resume state exists at ${this.resumeStatePath}, but output is missing: ${this.options.output}`);
+      }
+      this.resumeState = this.buildResumeState(oidField, loadedState);
+      this.resumeAfterOid = Number.isFinite(Number(loadedState.lastCompletedOid)) ? Number(loadedState.lastCompletedOid) : undefined;
+      (this.options as any).append = true;
+      if ((this.options as any)['oid-concurrency'] && Number((this.options as any)['oid-concurrency']) !== 1 && this.options.progress) {
+        process.stderr.write('[resume] forcing oid-concurrency=1 for deterministic resume\n');
+      }
+      (this.options as any)['oid-concurrency'] = 1;
+      (this.options as any)['id-list-threshold'] = Number.MAX_SAFE_INTEGER;
+      if (this.options.progress) {
+        process.stderr.write(`[resume] resuming after OID ${this.resumeAfterOid ?? 0}\n`);
+      }
+    } else {
+      if (!overwrite && outputExists) {
+        throw new Error(`Output already exists: ${this.options.output}. For resume mode, keep the matching state file or use --overwrite to start fresh.`);
+      }
+      (this.options as any)['oid-concurrency'] = 1;
+      (this.options as any)['id-list-threshold'] = Number.MAX_SAFE_INTEGER;
+      this.resumeAfterOid = undefined;
+      this.resumeState = this.buildResumeState(oidField);
+      await this.saveResumeState();
+    }
+  }
+
+  private findBatchMaxOid(features: Array<EsriFeatureType>, oidField: string | undefined): number | undefined {
+    if (!oidField || !features.length) return undefined;
+    let maxOid: number | undefined;
+    for (const feature of features) {
+      const attrs = (feature?.attributes ?? {}) as Record<string, unknown>;
+      let raw = attrs[oidField];
+      if (raw == null) {
+        const key = Object.keys(attrs).find(k => k.toLowerCase() === oidField.toLowerCase());
+        if (key) raw = attrs[key];
+      }
+      const oid = Number(raw);
+      if (!Number.isFinite(oid)) continue;
+      maxOid = maxOid == null ? oid : Math.max(maxOid, oid);
+    }
+    return maxOid;
+  }
+
+  private async recordResumeProgress(lastCompletedOid: number | undefined, acceptedCount: number): Promise<void> {
+    if (!this.resumeState || !this.resumeStatePath || lastCompletedOid == null) return;
+    const nextRecordsWritten = Number(this.resumeState.recordsWritten ?? 0) + Math.max(0, acceptedCount);
+    this.resumeState = this.buildResumeState(this.resumeState.oidField, {
+      ...this.resumeState,
+      lastCompletedOid,
+      recordsWritten: nextRecordsWritten,
+      completed: false,
+    });
+    await this.saveResumeState();
   }
 
   private requestStop(reason: 'max-records' | 'write-error') {
@@ -284,6 +439,7 @@ export default class EsriQuery {
     }
 
     // Create the writer instance and start the queries
+    await this.prepareResumeSupport();
     const outWkid = Number(this.whereObj.outSR);
     this.writer = new writerType(this.options as any, {
       ...this.sourceInfo,
@@ -333,6 +489,15 @@ export default class EsriQuery {
       // Ensure all in-flight writes are flushed before closing
       await this._lastWrite;
       if (this._writeError) throw this._writeError;
+      if (this.resumeState) {
+        this.resumeState = this.buildResumeState(this.resumeState.oidField, {
+          ...this.resumeState,
+          completed: true,
+          recordsWritten: this.resumeState.recordsWritten,
+          lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
+        });
+        await this.saveResumeState();
+      }
     } finally {
       await this.writer.close();
     }
@@ -348,7 +513,7 @@ export default class EsriQuery {
 
   async write(
     features: Array<EsriFeatureType> | undefined,
-  ): Promise<void> {
+  ): Promise<number> {
     // Delegate to batching path to keep one implementation
     return await this.writeBatchFromArcgis(features);
   }
@@ -360,8 +525,8 @@ export default class EsriQuery {
    */
   private async writeBatchFromArcgis(
     features: Array<EsriFeatureType> | undefined,
-  ): Promise<void> {
-    if (!features || !features.length) return;
+  ): Promise<number> {
+    if (!features || !features.length) return 0;
 
     const { options, writer, runtimeParams } = this;
 
@@ -417,6 +582,7 @@ export default class EsriQuery {
     if ((writer as any).status?.terminated) {
       this.requestStop('max-records');
     }
+    return typeof accepted === 'number' ? accepted : 0;
   }
 
   startQuery() {
@@ -452,6 +618,8 @@ export default class EsriQuery {
       bbox,
       bboxWkid,
       extraHeaders: this.extraHeaders,
+      resumeAfterOid: this.resumeAfterOid,
+      stableOidOrder: Boolean(this.resumeStatePath),
     });
 
     let lastRetriesPrinted = 0;
@@ -471,13 +639,21 @@ export default class EsriQuery {
         } catch {}
       }
       tool.on('data', (data: ArcGIS.Feature[]) => {
+        const batch = data as unknown as Array<EsriFeatureType>;
+        const batchMaxOid = this.findBatchMaxOid(batch, this.resumeOidField ?? oidField);
         if (this._stopRequested || this._writeError) {
           try { tool.cancel(); } catch {}
           return;
         }
-        const p = this.writeBatchFromArcgis(data as any);
-        // Chain sequentially to avoid unbounded promise arrays.
-        this._lastWrite = this._lastWrite.then(() => p).catch((err: any) => {
+        // Chain sequentially to avoid overlapping writes and to advance resume state
+        // only after the batch is durably written.
+        this._lastWrite = this._lastWrite.then(async () => {
+          const accepted = await this.writeBatchFromArcgis(batch as any);
+          if (batchMaxOid != null) {
+            this.resumeAfterOid = batchMaxOid;
+            await this.recordResumeProgress(batchMaxOid, accepted ?? 0);
+          }
+        }).catch((err: any) => {
           this._writeError = err instanceof Error ? err : new Error(String(err));
           this.requestStop('write-error');
           throw this._writeError;

@@ -1,4 +1,7 @@
 import { describe, expect, test } from '@jest/globals';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import EsriQuery from './esriQuery.js';
 import OidChunkQueryTool from '../helpers/OidChunkTool.js';
 
@@ -130,5 +133,89 @@ describe('EsriQuery.startQuery', () => {
       Cookie: 'SESSION=abc123',
       'X-Test': 'present',
     });
+  });
+
+  test('creates a resume state file and forces deterministic OID mode for geojsonseq', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(captured).toHaveLength(1);
+    expect(captured[0].oidConcurrency).toBe(1);
+    expect(captured[0].stableOidOrder).toBe(true);
+    expect(state.output).toBe(outputPath);
+    expect(state.format).toBe('geojsonseq');
+    expect(state.oidField).toBe('OBJECTID');
+  });
+
+  test('loads prior resume state and passes resumeAfterOid into OID query options', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    writeFileSync(outputPath, '{"type":"Feature","properties":{"OBJECTID":1},"geometry":null}\n');
+    writeFileSync(resumePath, JSON.stringify({
+      version: 1,
+      mode: 'geojsonseq-oid',
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      queryUrl: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0/query',
+      where: '1=1',
+      output: outputPath,
+      format: 'geojsonseq',
+      oidField: 'OBJECTID',
+      lastCompletedOid: 123,
+      recordsWritten: 1,
+      completed: false,
+      updatedAt: new Date().toISOString(),
+    }, null, 2));
+
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].resumeAfterOid).toBe(123);
+    expect(captured[0].oidConcurrency).toBe(1);
   });
 });

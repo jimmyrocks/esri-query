@@ -49,13 +49,21 @@ export default class OidChunkQueryTool extends QueryToolBase {
         }
         return data as { objectIds: number[] };
       });
-      const { objectIds } = idsResp;
+      const rawObjectIds = idsResp.objectIds;
+      let objectIds = rawObjectIds;
+      if ((this.options as any).stableOidOrder || Number.isFinite(Number((this.options as any).resumeAfterOid))) {
+        objectIds = [...objectIds].sort((a, b) => Number(a) - Number(b));
+      }
+      const resumeAfterOid = Number((this.options as any).resumeAfterOid);
+      if (Number.isFinite(resumeAfterOid)) {
+        objectIds = objectIds.filter((id: number) => Number(id) > resumeAfterOid);
+      }
       const exceededTransferLimit = Boolean((idsResp as any)?.exceededTransferLimit);
       if (exceededTransferLimit) {
         throw new Error('objectId list response exceeded transfer limit; aborting to avoid partial export');
       }
-      if (total > 0 && objectIds.length > 0 && objectIds.length < total) {
-        throw new Error(`objectId list response returned ${objectIds.length} IDs, expected ${total}; aborting to avoid partial export`);
+      if (total > 0 && rawObjectIds.length > 0 && rawObjectIds.length < total) {
+        throw new Error(`objectId list response returned ${rawObjectIds.length} IDs, expected ${total}; aborting to avoid partial export`);
       }
       if (!objectIds.length) { this.emit('done'); return; }
       await this._runSlicesParallel(objectIds);

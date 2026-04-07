@@ -42,6 +42,7 @@ export const optionDefinitions: OptionDef[] = [
   { name: 'oid-window', type: Number, description: 'OID range scan initial window size (default 5000)', group: 'base' },
   { name: 'format', alias: 't', type: String, description: 'Output format (geojson, esrijson, geojsonseq, gpkg, flatgeobuf, geoparquet)', group: 'base' },
   { name: 'progress', alias: 'p', type: Boolean, description: 'Show progress', group: 'base' },
+  { name: 'resume-state', type: String, description: 'Path to a JSON checkpoint file for resumable geojsonseq exports', group: 'base' },
   { name: 'parquetScanRows', alias: 'S', type: Number, description: 'GeoParquet: lookahead rows for schema inference (default 1000)', group: 'base' },
   { name: 'no-bbox', type: Boolean, description: 'Disable per-feature bbox and file-level bbox output', group: 'geometry' },
   { name: 'geometry-column-name', type: String, description: 'GeoParquet: geometry column name (default "geometry")', group: 'geometry' },
@@ -77,6 +78,7 @@ export const jobSchema = z.object({
   output: z.string().optional(),
   format: z.enum(['geojson', 'esrijson', 'geojsonseq', 'gpkg', 'flatgeobuf', 'geoparquet']).optional(),
   progress: z.boolean().optional(),
+  'resume-state': z.string().optional(),
   'max-records': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'on-invalid': z.enum(['throw', 'keep', 'skip']).optional(),
   'progress-every': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
@@ -118,6 +120,7 @@ export type CliBaseOptionsType = {
   output?: string;
   format?: 'geojson' | 'esrijson' | 'geojsonseq' | 'gpkg' | 'flatgeobuf' | 'geoparquet';
   progress?: boolean;
+  'resume-state'?: string;
   'max-records'?: number;
   'on-invalid'?: 'throw' | 'keep' | 'skip';
   'progress-every'?: number;

@@ -11,15 +11,18 @@ async function rmrf(p: string) {
 describe('File writer', () => {
     const singleOut = 'File.unit.test.output.log';
     const partDir = 'File.unit.test.partitions';
+    const rolledDir = 'File.unit.test.rolled';
 
     beforeEach(async () => {
         await rmrf(singleOut);
         await rmrf(partDir);
+        await rmrf(rolledDir);
     });
 
     afterEach(async () => {
         await rmrf(singleOut);
         await rmrf(partDir);
+        await rmrf(rolledDir);
     });
 
     test('writes plain strings to a single file (non-partitioned)', async () => {
@@ -87,5 +90,68 @@ describe('File writer', () => {
             const lines = ny0Contents.trim().split('\n');
             expect(lines.length).toBeGreaterThan(0);
         }
+    });
+
+    test('writes rolled geojsonseq segment files from a single output path', async () => {
+        const outputPath = join(rolledDir, 'export.geojsonl');
+        const file = new File({ output: outputPath, format: 'geojsonseq', 'max-file-bytes': 220 });
+        await file.open();
+
+        const features = [
+            { type: 'Feature', properties: { id: 1, note: 'a'.repeat(120) }, geometry: { type: 'Point', coordinates: [-122.4, 37.8] } },
+            { type: 'Feature', properties: { id: 2, note: 'b'.repeat(120) }, geometry: { type: 'Point', coordinates: [-122.5, 37.7] } },
+            { type: 'Feature', properties: { id: 3, note: 'c'.repeat(120) }, geometry: { type: 'Point', coordinates: [-73.98, 40.75] } },
+        ] as any[];
+
+        for (const feature of features) {
+            await file.writeFeature(feature);
+        }
+
+        await file.save();
+        await file.close();
+
+        const files = (await fsp.readdir(rolledDir)).filter((name) => /^export\.part\d{4}\.geojsonl$/.test(name)).sort();
+        expect(files.length).toBeGreaterThan(1);
+
+        const combined = (await Promise.all(files.map((name) => fsp.readFile(join(rolledDir, name), 'utf8')))).join('');
+        expect(combined).toContain('"id":1');
+        expect(combined).toContain('"id":2');
+        expect(combined).toContain('"id":3');
+    });
+
+    test('truncates the active rolled segment back to the saved checkpoint before resuming', async () => {
+        const outputPath = join(rolledDir, 'resume.geojsonl');
+        const checkpointWriter = new File({ output: outputPath, format: 'geojsonseq', 'max-file-bytes': 1024 });
+        await checkpointWriter.open();
+
+        const feature1 = { type: 'Feature', properties: { id: 1 }, geometry: { type: 'Point', coordinates: [-122.4, 37.8] } } as any;
+        const feature2 = { type: 'Feature', properties: { id: 2 }, geometry: { type: 'Point', coordinates: [-122.5, 37.7] } } as any;
+        const feature3 = { type: 'Feature', properties: { id: 3 }, geometry: { type: 'Point', coordinates: [-122.6, 37.6] } } as any;
+
+        await checkpointWriter.writeFeature(feature1);
+        await checkpointWriter.save();
+        const checkpoint = checkpointWriter.getResumeCheckpoint();
+
+        await checkpointWriter.writeFeature(feature2);
+        await checkpointWriter.save();
+        await checkpointWriter.close();
+
+        const resumed = new File({
+            output: outputPath,
+            format: 'geojsonseq',
+            'max-file-bytes': 1024,
+            append: true,
+            'resume-segment-index': checkpoint.segmentIndex,
+            'resume-output-bytes': checkpoint.outputBytes,
+        } as any);
+        await resumed.open();
+        await resumed.writeFeature(feature3);
+        await resumed.save();
+        await resumed.close();
+
+        const contents = await fsp.readFile(join(rolledDir, 'resume.part0000.geojsonl'), 'utf8');
+        expect(contents).toContain('"id":1');
+        expect(contents).toContain('"id":3');
+        expect(contents).not.toContain('"id":2');
     });
 });

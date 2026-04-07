@@ -1,5 +1,5 @@
 import { createWriteStream, WriteStream, fsyncSync, existsSync } from 'fs';
-import { mkdir } from 'fs/promises';
+import { mkdir, readdir, rm, stat, truncate } from 'fs/promises';
 import { dirname, basename, extname, join } from 'path';
 import { once } from 'events';
 import StreamWriter from './StreamWriter.js';
@@ -13,6 +13,7 @@ import Writer from './Writer.js';
  */
 export default class File extends StreamWriter {
     private isPartitioned = false;
+    private isSegmented = false;
     private partitionAttr: string | null = null;
     private maxFileBytes = 256 * 1024 * 1024; // 256 MB default
     private basePath: string | null = null;     // for partitioned mode, this is a directory
@@ -20,9 +21,165 @@ export default class File extends StreamWriter {
 
     private partitions: Map<string, { stream: WriteStream; fd: number | null; bytes: number; count: number; partIndex: number }> = new Map();
     private fd: number | null = null;
+    private outputBytes = 0;
+    private segmentIndex = 0;
+    private segmentBytes = 0;
+    private segmentPath: string | null = null;
+
+    static segmentPathFromOutput(outputPath: string, index: number): string {
+        const ext = extname(outputPath) || '.geojsonl';
+        const stem = basename(outputPath, ext);
+        return join(dirname(outputPath), `${stem}.part${String(index).padStart(4, '0')}${ext}`);
+    }
+
+    private static segmentMatcher(outputPath: string): { dir: string; regex: RegExp } {
+        const ext = extname(outputPath) || '.geojsonl';
+        const stem = basename(outputPath, ext).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedExt = ext.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return {
+            dir: dirname(outputPath),
+            regex: new RegExp(`^${stem}\\.part(\\d{4})${escapedExt}$`),
+        };
+    }
 
     private sanitizeKey(key: string): string {
         return key.replace(/[^A-Za-z0-9._-]/g, '_');
+    }
+
+    private async listSegmentFiles(outputPath: string): Promise<Array<{ index: number; path: string }>> {
+        const { dir, regex } = File.segmentMatcher(outputPath);
+        try {
+            const names = await readdir(dir);
+            return names
+                .map((name) => {
+                    const match = regex.exec(name);
+                    if (!match) return null;
+                    return {
+                        index: Number(match[1]),
+                        path: join(dir, name),
+                    };
+                })
+                .filter((entry): entry is { index: number; path: string } => Boolean(entry))
+                .sort((a, b) => a.index - b.index);
+        } catch (err: any) {
+            if (err?.code === 'ENOENT') return [];
+            throw err;
+        }
+    }
+
+    private async removeSegmentFiles(outputPath: string, predicate?: (index: number) => boolean): Promise<void> {
+        const existing = await this.listSegmentFiles(outputPath);
+        await Promise.all(existing
+            .filter((entry) => predicate ? predicate(entry.index) : true)
+            .map((entry) => rm(entry.path, { force: true })));
+    }
+
+    private async reconcileSingleFileResume(outPath: string, checkpointBytes: number): Promise<void> {
+        try {
+            const current = await stat(outPath);
+            if (current.size < checkpointBytes) {
+                throw new Error(`Output is smaller than the saved checkpoint (${current.size} < ${checkpointBytes}).`);
+            }
+            if (current.size !== checkpointBytes) {
+                await truncate(outPath, checkpointBytes);
+            }
+        } catch (err: any) {
+            if (err?.code === 'ENOENT' && checkpointBytes === 0) return;
+            if (err?.code === 'ENOENT') {
+                throw new Error(`Output is missing but resume state expects ${checkpointBytes} written bytes: ${outPath}`);
+            }
+            throw err;
+        }
+    }
+
+    private async openSegmentStream(outputPath: string, index: number, checkpointBytes: number): Promise<void> {
+        const filename = File.segmentPathFromOutput(outputPath, index);
+        await mkdir(dirname(filename), { recursive: true });
+
+        try {
+            const current = await stat(filename);
+            if (current.size < checkpointBytes) {
+                throw new Error(`Segment ${basename(filename)} is smaller than the saved checkpoint (${current.size} < ${checkpointBytes}).`);
+            }
+            if (current.size !== checkpointBytes) {
+                await truncate(filename, checkpointBytes);
+            }
+        } catch (err: any) {
+            if (err?.code !== 'ENOENT') throw err;
+            if (checkpointBytes > 0) {
+                throw new Error(`Segment is missing but resume state expects ${checkpointBytes} written bytes: ${filename}`);
+            }
+        }
+
+        this.stream = createWriteStream(filename, { flags: 'a', highWaterMark: 1 << 20 });
+        this.segmentPath = filename;
+        this.segmentIndex = index;
+        this.segmentBytes = checkpointBytes;
+        this.fd = null;
+        (this.stream as WriteStream).once('open', (nfd: number) => { this.fd = nfd; });
+        if (!(this.stream as any).writable) await once(this.stream as any, 'open');
+    }
+
+    private async rollSegment() {
+        if (!this.isSegmented) return;
+        if (!this.stream) throw new Error('Segment stream is not open');
+
+        const current = this.stream as WriteStream;
+        if (typeof this.fd === 'number') {
+            try {
+                fsyncSync(this.fd);
+            } catch { }
+        }
+        await new Promise<void>((resolve, reject) => {
+            current.end((err: any) => err ? reject(err) : resolve());
+        });
+
+        const outPath = (this as any).options?.output as string;
+        this.stream = null;
+        this.fd = null;
+        this.segmentPath = null;
+        this.segmentIndex += 1;
+        this.segmentBytes = 0;
+        await this.openSegmentStream(outPath, this.segmentIndex, 0);
+    }
+
+    private async writeSegmentPayload(payload: string): Promise<void> {
+        if (!this.stream) throw new Error('File is not open');
+        if (!this.status.canWrite) return;
+        try {
+            const ok = this.stream.write(payload);
+            if (!ok) await once(this.stream, 'drain');
+        } catch (err: any) {
+            const target = this.segmentPath ?? (this as any).options?.output;
+            throw new Error(`Failed to write to output file: ${target}. ${err?.message || err}`);
+        }
+        this.segmentBytes += Buffer.byteLength(payload);
+        if (this.segmentBytes >= this.maxFileBytes) {
+            await this.rollSegment();
+        }
+    }
+
+    getResumeCheckpoint(): {
+        outputMode: 'single-file' | 'segmented';
+        outputBytes: number;
+        segmentIndex?: number;
+        maxFileBytes?: number;
+        path: string;
+    } {
+        if (this.isSegmented) {
+            return {
+                outputMode: 'segmented',
+                outputBytes: this.segmentBytes,
+                segmentIndex: this.segmentIndex,
+                maxFileBytes: this.maxFileBytes,
+                path: this.segmentPath ?? File.segmentPathFromOutput(String((this as any).options?.output), this.segmentIndex),
+            };
+        }
+        return {
+            outputMode: 'single-file',
+            outputBytes: this.outputBytes,
+            path: String((this as any).options?.output ?? ''),
+        };
     }
 
     private async openPartitionStream(key: string): Promise<{ stream: WriteStream; fd: number | null; count: number; bytes: number; partIndex: number }> {
@@ -82,6 +239,7 @@ export default class File extends StreamWriter {
 
         // Partitioned output only makes sense for NDJSON/geojsonseq
         const fmt = (this as any).options?.format;
+        const segmented = !this.partitionAttr && fmt === 'geojsonseq' && typeof mfb === 'number' && isFinite(mfb) && mfb > 0;
         if (this.partitionAttr && fmt !== 'geojsonseq') {
           throw new Error('Partitioned output (--partition) requires --format geojsonseq (NDJSON).');
         }
@@ -100,8 +258,49 @@ export default class File extends StreamWriter {
         const ext = extname(outPath);
         if (ext) this.fileExt = ext;
 
+        if (segmented) {
+            this.isSegmented = true;
+            const overwrite = Boolean((this as any).options?.overwrite);
+            const resumeIndexRaw = (this as any).options?.['resume-segment-index'];
+            const resumeBytesRaw = (this as any).options?.['resume-output-bytes'];
+            const resumeIndex = Number.isFinite(Number(resumeIndexRaw)) ? Math.max(0, Number(resumeIndexRaw)) : 0;
+            const resumeBytes = Number.isFinite(Number(resumeBytesRaw)) ? Math.max(0, Number(resumeBytesRaw)) : 0;
+            const resuming = append || resumeIndex > 0 || resumeBytes > 0;
+
+            await mkdir(dirname(outPath), { recursive: true });
+            if (resuming) {
+                await this.removeSegmentFiles(outPath, (index) => index > resumeIndex);
+            } else {
+                const existingSegments = await this.listSegmentFiles(outPath);
+                if (existingSegments.length) {
+                    if (!overwrite) {
+                        throw new Error(`Output already exists: ${outPath} (segment files present). Use --overwrite.`);
+                    }
+                    await this.removeSegmentFiles(outPath);
+                }
+                if (existsSync(outPath)) {
+                    if (!overwrite) {
+                        throw new Error(`Output already exists: ${outPath}. Use --overwrite.`);
+                    }
+                    await rm(outPath, { force: true });
+                }
+            }
+
+            await this.openSegmentStream(outPath, resumeIndex, resuming ? resumeBytes : 0);
+            await this.onOpen();
+            return;
+        }
+
         // Non-partitioned: create a single stream like before
         await mkdir(dirname(outPath), { recursive: true });
+        const resumeBytesRaw = (this as any).options?.['resume-output-bytes'];
+        const resumeBytes = Number.isFinite(Number(resumeBytesRaw)) ? Math.max(0, Number(resumeBytesRaw)) : undefined;
+        if (append && resumeBytes != null) {
+            await this.reconcileSingleFileResume(outPath, resumeBytes);
+            this.outputBytes = resumeBytes;
+        } else {
+            this.outputBytes = 0;
+        }
         // If the output exists and we're not appending, honor --overwrite
         if (!append && existsSync(outPath) && !(this as any).options?.overwrite) {
             throw new Error(`Output already exists: ${outPath}. Use --overwrite or --append.`);
@@ -171,11 +370,16 @@ export default class File extends StreamWriter {
             // Internal guard: writeString should not be called in partitioned mode; silently no-op.
             return;
         }
+        if (this.isSegmented) {
+            await this.writeSegmentPayload(line);
+            return;
+        }
         if (!this.stream) throw new Error('File is not open');
         if (!this.status.canWrite) return; // prevent "write after end" when upper layers have closed the writer
         try {
             const ok = this.stream.write(line);
             if (!ok) await once(this.stream, 'drain');
+            this.outputBytes += Buffer.byteLength(line);
         } catch (err: any) {
             throw new Error(`Failed to write to output file: ${(this as any).options?.output}. ${err?.message || err}`);
         }
@@ -187,11 +391,16 @@ export default class File extends StreamWriter {
             // Partitioned mode does not use text framing from the base class.
             return;
         }
+        if (this.isSegmented) {
+            await this.writeSegmentPayload(payload);
+            return;
+        }
         if (!this.stream) throw new Error('File is not open');
         if (!this.status.canWrite) return;
         try {
             const ok = this.stream.write(payload);
             if (!ok) await once(this.stream, 'drain');
+            this.outputBytes += Buffer.byteLength(payload);
         } catch (err: any) {
             throw new Error(`Failed to write to output file: ${(this as any).options?.output}. ${err?.message || err}`);
         }
@@ -202,6 +411,13 @@ export default class File extends StreamWriter {
         if (this.isPartitioned) {
             for (const { fd } of this.partitions.values()) {
                 try { if (typeof fd === 'number') fsyncSync(fd); } catch { }
+            }
+            return;
+        }
+        if (this.isSegmented) {
+            if (!this.stream) return;
+            try { if (typeof this.fd === 'number') fsyncSync(this.fd); } catch (err: any) {
+                console.error(`[warn] fsync failed for ${this.segmentPath ?? (this as any).options?.output}:`, err?.message || err);
             }
             return;
         }
@@ -228,6 +444,26 @@ export default class File extends StreamWriter {
             this.partitions.clear();
             this.stream = null;
             this.fd = null;
+            return;
+        }
+
+        if (this.isSegmented) {
+            if (!this.stream) return;
+            try { await this.onClose(); } catch (err) { console.error('[warn] error during base close():', err); }
+            const current = this.stream as WriteStream;
+            const currentPath = this.segmentPath;
+            await new Promise<void>((resolve, reject) => {
+                try {
+                    if (typeof this.fd === 'number') fsyncSync(this.fd);
+                } catch { }
+                current.end((err: any) => err ? reject(err) : resolve());
+            });
+            this.stream = null;
+            this.fd = null;
+            if (currentPath && this.segmentBytes === 0) {
+                await rm(currentPath, { force: true });
+            }
+            this.segmentPath = null;
             return;
         }
 

@@ -43,6 +43,7 @@ export const optionDefinitions: OptionDef[] = [
   { name: 'oid-window', type: Number, description: 'OID range scan initial window size (default 5000)', group: 'base' },
   { name: 'format', alias: 't', type: String, description: 'Output format (geojson, esrijson, geojsonseq, gpkg, flatgeobuf, geoparquet)', group: 'base' },
   { name: 'progress', alias: 'p', type: Boolean, description: 'Show progress', group: 'base' },
+  { name: 'max-file-bytes', type: Number, description: 'GeoJSONSeq: roll output into .partNNNN files after this many bytes', group: 'base' },
   { name: 'resume-state', type: String, description: 'Path to a JSON checkpoint file for resumable geojsonseq exports', group: 'base' },
   { name: 'parquetScanRows', alias: 'S', type: Number, description: 'GeoParquet: lookahead rows for schema inference (default 1000)', group: 'base' },
   { name: 'no-bbox', type: Boolean, description: 'Disable per-feature bbox and file-level bbox output', group: 'geometry' },
@@ -79,6 +80,7 @@ export const jobSchema = z.object({
   output: z.string().optional(),
   format: z.enum(['geojson', 'esrijson', 'geojsonseq', 'gpkg', 'flatgeobuf', 'geoparquet']).optional(),
   progress: z.boolean().optional(),
+  'max-file-bytes': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'resume-state': z.string().optional(),
   'max-records': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'on-invalid': z.enum(['throw', 'keep', 'skip']).optional(),
@@ -123,6 +125,7 @@ export type CliBaseOptionsType = {
   output?: string;
   format?: 'geojson' | 'esrijson' | 'geojsonseq' | 'gpkg' | 'flatgeobuf' | 'geoparquet';
   progress?: boolean;
+  'max-file-bytes'?: number;
   'resume-state'?: string;
   'max-records'?: number;
   'on-invalid'?: 'throw' | 'keep' | 'skip';
@@ -227,6 +230,9 @@ export function renderHelp(): string {
   lines.push('');
   lines.push('  # Send a session cookie or any other custom header');
   lines.push('  esri-query -u URL -W "1=1" --header "Cookie: SESSION=abc123" -t geojson -o out.geojson');
+  lines.push('');
+  lines.push('  # Resume into rolled GeoJSONSeq parts instead of one giant file');
+  lines.push('  esri-query -u URL -W "1=1" -t geojsonseq -o out.geojsonl --max-file-bytes 500000000 --resume-state out.resume.json');
   lines.push('');
   lines.push('  # Write GeoParquet (columnar) with required output path');
   lines.push('  esri-query -u URL -W "1=1" -t geoparquet -o data.parquet');

@@ -88,7 +88,24 @@ esri-query \
   --header "Cookie: SESSION=abc123"
 ```
 
-If the cookie expires mid-run, update the `Cookie` header and rerun the same command. `esri-query` will read `out.resume.json`, append to `out.geojsonl`, and continue after the last committed OID.
+If the cookie expires mid-run, update the `Cookie` header and rerun the same command. `esri-query` will read `out.resume.json`, trim the active output back to the last saved checkpoint if needed, and continue after the last committed OID.
+
+If you do not want one giant NDJSON file, add `--max-file-bytes` to roll output into `out.part0000.geojsonl`, `out.part0001.geojsonl`, and so on:
+
+```bash
+esri-query \
+  -u <layer-url> \
+  -W "1=1" \
+  -t geojsonseq \
+  -o out.geojsonl \
+  --max-file-bytes 500000000 \
+  --resume-state out.resume.json \
+  --header "Cookie: SESSION=abc123"
+```
+
+In rolled-output mode, resume will continue in the current `.partNNNN` file or the next one as needed, and it will truncate the active part back to the checkpointed byte count before appending. That avoids duplicate NDJSON rows after crashes.
+
+If you already have an older single-file `resume.json`, turning on `--max-file-bytes` will migrate the checkpointed portion of `out.geojsonl` into `out.part0000.geojsonl` and continue from there.
 
 If resume mode says the object ID field is unavailable, supply it explicitly with `--oid-field`:
 
@@ -104,7 +121,7 @@ esri-query \
 ```
 
 After a failure:
-1. Do not delete `out.geojsonl` or `out.resume.json`.
+1. Do not delete the existing output file(s) or `out.resume.json`.
 2. If the session expired, replace the cookie value in `--header "Cookie: ..."` or in your YAML `headers.Cookie`.
 3. Rerun the same job with the same `--output` and `--resume-state` paths.
 4. Check the error output for the resume checkpoint line. It prints the last committed OID and the checkpoint file path.
@@ -161,6 +178,7 @@ Query behavior:
 - `--json` (bool): Force JSON; disables PBF.
 - `--token` (string): ArcGIS token for secured services.
 - `--header` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
+- `--max-file-bytes` (number): For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files after this many bytes.
 - `--oid-field` (string): Object ID field override when the service metadata is missing or wrong.
 - `--resume-state` (string): JSON checkpoint file for resumable `geojsonseq` exports.
 - `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
@@ -199,6 +217,7 @@ options:
   headers:
     Cookie: SESSION=abc123
     X-Requested-With: esri-query
+  max-file-bytes: 500000000
   resume-state: out.resume.json
   oid-start: 250
   oid-concurrency: 2
@@ -261,7 +280,8 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `--dedupe`: Opt-in feature de-duplication by hashing. Beware of memory on very large layers.
 - `--token`: ArcGIS token for secured services (added to all requests).
 - `--header`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
-- `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Current scope is `geojsonseq` only; reruns append to the existing NDJSON output.
+- `--max-file-bytes`: For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files instead of one large NDJSON file.
+- `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Current scope is `geojsonseq` only; reruns continue from the last checkpointed OID and trim the active output file or part before appending.
 - `--out-fields` (`-F`): Request only selected attributes (`name,type,status`) instead of `*`.
 - `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
 - `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.

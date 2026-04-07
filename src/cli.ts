@@ -252,6 +252,9 @@ export async function main(argv = process.argv.slice(2)) {
     if ((validatedMerged as any).partition && fmt !== 'geojsonseq') {
       throw new Error(`${label}: --partition requires --format geojsonseq (NDJSON).`);
     }
+    if ((validatedMerged as any)['max-file-bytes'] && fmt !== 'geojsonseq') {
+      throw new Error(`${label}: --max-file-bytes requires --format geojsonseq (NDJSON).`);
+    }
     if (validatedMerged.format === 'flatgeobuf' && typeof validatedMerged.output === 'string' && !validatedMerged.output.endsWith('.fgb')) {
       process.stderr.write(`[warn] ${label}: output extension should be ".fgb" for flatgeobuf format (got "${validatedMerged.output}")\n`);
     }

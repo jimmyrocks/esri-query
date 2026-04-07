@@ -1,5 +1,5 @@
 import { describe, expect, test } from '@jest/globals';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EsriQuery from './esriQuery.js';
@@ -196,6 +196,8 @@ describe('EsriQuery.startQuery', () => {
     expect(state.output).toBe(outputPath);
     expect(state.format).toBe('geojsonseq');
     expect(state.oidField).toBe('OBJECTID');
+    expect(state.outputMode).toBe('single-file');
+    expect(state.outputBytes).toBe(0);
   });
 
   test('loads prior resume state and passes resumeAfterOid into OID query options', async () => {
@@ -244,6 +246,8 @@ describe('EsriQuery.startQuery', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].resumeAfterOid).toBe(123);
     expect(captured[0].oidConcurrency).toBe(1);
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.outputBytes).toBeGreaterThan(0);
   });
 
   test('allows resume mode with oid-field override when metadata is missing the object ID field', async () => {
@@ -278,5 +282,94 @@ describe('EsriQuery.startQuery', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].oidField).toBe('MY_OID');
     expect(state.oidField).toBe('MY_OID');
+  });
+
+  test('creates segmented resume state when max-file-bytes is enabled', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'rolled.geojsonl');
+    const resumePath = join(tempDir, 'rolled.resume.json');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+      'max-file-bytes': 256,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {};
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.outputMode).toBe('segmented');
+    expect(state.segmentIndex).toBe(0);
+    expect(state.maxFileBytes).toBe(256);
+  });
+
+  test('migrates old single-file resume state into rolled segment files', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const firstLine = '{"type":"Feature","properties":{"OBJECTID":1},"geometry":null}\n';
+    const secondLine = '{"type":"Feature","properties":{"OBJECTID":2},"geometry":null}\n';
+    const resumePath = join(tempDir, 'out.resume.json');
+    writeFileSync(outputPath, firstLine + secondLine);
+    writeFileSync(resumePath, JSON.stringify({
+      version: 1,
+      mode: 'geojsonseq-oid',
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      queryUrl: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0/query',
+      where: '1=1',
+      output: outputPath,
+      format: 'geojsonseq',
+      oidField: 'OBJECTID',
+      lastCompletedOid: 1,
+      recordsWritten: 1,
+      completed: false,
+      updatedAt: new Date().toISOString(),
+    }, null, 2));
+
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+      'max-file-bytes': 256,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    const migratedPath = join(tempDir, 'out.part0000.geojsonl');
+    expect(captured).toHaveLength(1);
+    expect(captured[0].resumeAfterOid).toBe(1);
+    expect(state.outputMode).toBe('segmented');
+    expect(state.segmentIndex).toBe(1);
+    expect(state.outputBytes).toBe(0);
+    expect(existsSync(outputPath)).toBe(false);
+    expect(existsSync(migratedPath)).toBe(true);
+    expect(readFileSync(migratedPath, 'utf8')).toBe(firstLine);
   });
 });

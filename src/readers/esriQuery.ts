@@ -3,8 +3,8 @@ import crypto from 'crypto';
 import post from '../helpers/post-async.js';
 import * as ArcGIS from 'arcgis-rest-api';
 import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-types.js';
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createReadStream, existsSync } from 'node:fs';
+import { mkdir, readFile, rename, rm, truncate, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import Stdout from '../writers/Stdout.js';
@@ -83,10 +83,13 @@ export type EsriQueryOptions = {
   'resume-state'?: string;
   'oid-field'?: string;
   oidField?: string;
+  'max-file-bytes'?: number;
 };
 
+type ResumeOutputMode = 'single-file' | 'segmented';
+
 type ResumeState = {
-  version: 1;
+  version: 1 | 2;
   mode: 'geojsonseq-oid';
   url: string;
   queryUrl: string;
@@ -97,6 +100,10 @@ type ResumeState = {
   totalFeatureCount?: number;
   lastCompletedOid?: number;
   recordsWritten?: number;
+  outputMode?: ResumeOutputMode;
+  outputBytes?: number;
+  segmentIndex?: number;
+  maxFileBytes?: number;
   completed?: boolean;
   updatedAt: string;
 };
@@ -199,9 +206,34 @@ export default class EsriQuery {
     return inferred || undefined;
   }
 
+  private getConfiguredMaxFileBytes(): number | undefined {
+    const raw = Number((this.options as any)['max-file-bytes']);
+    return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+  }
+
+  private getResumeOutputMode(state?: Partial<ResumeState>): ResumeOutputMode {
+    if (state) {
+      if (state.outputMode === 'segmented') return 'segmented';
+      if ((state.segmentIndex != null && Number.isFinite(Number(state.segmentIndex))) ||
+          (state.maxFileBytes != null && Number.isFinite(Number(state.maxFileBytes)))) {
+        return 'segmented';
+      }
+      return 'single-file';
+    }
+    return this.getConfiguredMaxFileBytes() ? 'segmented' : 'single-file';
+  }
+
   private buildResumeState(oidField: string, base?: Partial<ResumeState>): ResumeState {
+    const outputMode = this.getResumeOutputMode(base);
+    const outputBytes = Number.isFinite(Number(base?.outputBytes)) ? Math.max(0, Number(base?.outputBytes)) : 0;
+    const maxFileBytes = outputMode === 'segmented'
+      ? (Number.isFinite(Number(base?.maxFileBytes)) ? Number(base?.maxFileBytes) : this.getConfiguredMaxFileBytes())
+      : undefined;
+    const segmentIndex = outputMode === 'segmented'
+      ? (Number.isFinite(Number(base?.segmentIndex)) ? Math.max(0, Number(base?.segmentIndex)) : 0)
+      : undefined;
     return {
-      version: 1,
+      version: 2,
       mode: 'geojsonseq-oid',
       url: this.url,
       queryUrl: this.queryUrl,
@@ -212,8 +244,137 @@ export default class EsriQuery {
       totalFeatureCount: this.totalFeatureCount,
       lastCompletedOid: base?.lastCompletedOid,
       recordsWritten: base?.recordsWritten ?? 0,
+      outputMode,
+      outputBytes,
+      ...(outputMode === 'segmented' ? { segmentIndex, maxFileBytes } : {}),
       completed: base?.completed ?? false,
       updatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async findNdjsonCheckpointBytes(outputPath: string, recordsWritten: number): Promise<number> {
+    if (recordsWritten <= 0) return 0;
+
+    return await new Promise<number>((resolve, reject) => {
+      let remaining = recordsWritten;
+      let offset = 0;
+      let settled = false;
+      const stream = createReadStream(outputPath, { highWaterMark: 1 << 20 });
+
+      const finish = (value: number) => {
+        if (settled) return;
+        settled = true;
+        stream.destroy();
+        resolve(value);
+      };
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+
+      stream.on('data', (chunk: Buffer) => {
+        for (let i = 0; i < chunk.length; i += 1) {
+          if (chunk[i] !== 0x0A) continue;
+          remaining -= 1;
+          if (remaining === 0) {
+            finish(offset + i + 1);
+            return;
+          }
+        }
+        offset += chunk.length;
+      });
+      stream.on('error', (err: any) => {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      });
+      stream.on('close', () => {
+        if (!settled) {
+          fail(new Error(`Output does not contain ${recordsWritten} newline-delimited features: ${outputPath}`));
+        }
+      });
+    });
+  }
+
+  private async resolveSingleFileResumeBytes(state: ResumeState): Promise<number> {
+    const savedBytes = Number(state.outputBytes);
+    if (Number.isFinite(savedBytes) && savedBytes >= 0) return savedBytes;
+    const outputPath = String(this.options.output);
+    const recordsWritten = Math.max(0, Number(state.recordsWritten ?? 0));
+    if (recordsWritten === 0) return 0;
+    return await this.findNdjsonCheckpointBytes(outputPath, recordsWritten);
+  }
+
+  private async migrateSingleFileResumeToSegments(state: ResumeState, maxFileBytes: number): Promise<ResumeState> {
+    const outputPath = String(this.options.output);
+    const checkpointBytes = Math.max(0, Number(state.outputBytes ?? 0));
+    const firstSegmentPath = File.segmentPathFromOutput(outputPath, 0);
+
+    if (existsSync(firstSegmentPath)) {
+      throw new Error(`Cannot migrate resume output: ${firstSegmentPath} already exists.`);
+    }
+
+    if (checkpointBytes > 0) {
+      if (!existsSync(outputPath)) {
+        throw new Error(`Cannot migrate resume output: missing source file ${outputPath}`);
+      }
+      await truncate(outputPath, checkpointBytes);
+      await mkdir(dirname(firstSegmentPath), { recursive: true });
+      await rename(outputPath, firstSegmentPath);
+      if (this.options.progress) {
+        process.stderr.write(`[resume] migrated checkpointed output to ${firstSegmentPath}\n`);
+      }
+      return {
+        ...state,
+        outputMode: 'segmented',
+        outputBytes: 0,
+        segmentIndex: 1,
+        maxFileBytes,
+      };
+    }
+
+    if (existsSync(outputPath)) {
+      await truncate(outputPath, 0);
+      await rm(outputPath, { force: true });
+    }
+
+    return {
+      ...state,
+      outputMode: 'segmented',
+      outputBytes: 0,
+      segmentIndex: 0,
+      maxFileBytes,
+    };
+  }
+
+  private applyResumeWriterOptions(state: ResumeState): void {
+    (this.options as any).append = true;
+    (this.options as any)['resume-output-bytes'] = Math.max(0, Number(state.outputBytes ?? 0));
+    if (this.getResumeOutputMode(state) === 'segmented') {
+      const maxFileBytes = Number(state.maxFileBytes ?? this.getConfiguredMaxFileBytes());
+      if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) {
+        throw new Error('Resume state is missing a valid max-file-bytes value for segmented output.');
+      }
+      (this.options as any)['max-file-bytes'] = maxFileBytes;
+      (this.options as any)['resume-segment-index'] = Math.max(0, Number(state.segmentIndex ?? 0));
+    } else {
+      delete (this.options as any)['resume-segment-index'];
+    }
+  }
+
+  private getWriterResumeStatePatch(): Partial<ResumeState> {
+    if (!(this.writer instanceof File)) return {};
+    const checkpoint = this.writer.getResumeCheckpoint();
+    if (checkpoint.outputMode === 'segmented') {
+      return {
+        outputMode: 'segmented',
+        outputBytes: checkpoint.outputBytes,
+        segmentIndex: checkpoint.segmentIndex,
+        maxFileBytes: checkpoint.maxFileBytes,
+      };
+    }
+    return {
+      outputMode: 'single-file',
+      outputBytes: checkpoint.outputBytes,
     };
   }
 
@@ -244,7 +405,6 @@ export default class EsriQuery {
     this.resumeOidField = oidField;
 
     const overwrite = Boolean((this.options as any).overwrite);
-    const outputExists = existsSync(String(this.options.output));
     let loadedState: ResumeState | undefined;
 
     if (!overwrite) {
@@ -256,41 +416,64 @@ export default class EsriQuery {
     }
 
     if (!overwrite && loadedState) {
-      const expected = this.buildResumeState(oidField, loadedState);
       const mismatches = [
         loadedState.mode !== 'geojsonseq-oid' ? 'mode' : null,
-        loadedState.url !== expected.url ? 'url' : null,
-        loadedState.queryUrl !== expected.queryUrl ? 'queryUrl' : null,
-        loadedState.where !== expected.where ? 'where' : null,
-        loadedState.output !== expected.output ? 'output' : null,
-        loadedState.format !== expected.format ? 'format' : null,
-        loadedState.oidField !== expected.oidField ? 'oidField' : null,
+        loadedState.url !== this.url ? 'url' : null,
+        loadedState.queryUrl !== this.queryUrl ? 'queryUrl' : null,
+        loadedState.where !== this.options.where ? 'where' : null,
+        loadedState.output !== String(this.options.output) ? 'output' : null,
+        loadedState.format !== 'geojsonseq' ? 'format' : null,
+        loadedState.oidField !== oidField ? 'oidField' : null,
       ].filter(Boolean);
       if (mismatches.length) {
         throw new Error(`Resume state does not match this job (${mismatches.join(', ')}). Use --overwrite to start fresh or point to the correct state file.`);
       }
-      if (!outputExists) {
-        throw new Error(`Resume state exists at ${this.resumeStatePath}, but output is missing: ${this.options.output}`);
+
+      let normalizedState: ResumeState = { ...loadedState };
+      const loadedMode = this.getResumeOutputMode(normalizedState);
+      const loadedMaxFileBytes = Number(normalizedState.maxFileBytes);
+      const configuredMaxFileBytes = this.getConfiguredMaxFileBytes();
+      if (loadedMode === 'segmented') {
+        if (!Number.isFinite(loadedMaxFileBytes) || loadedMaxFileBytes <= 0) {
+          throw new Error('Resume state is missing a valid max-file-bytes value for segmented output.');
+        }
+        if (configuredMaxFileBytes == null) {
+          (this.options as any)['max-file-bytes'] = loadedMaxFileBytes;
+        } else if (configuredMaxFileBytes !== loadedMaxFileBytes) {
+          throw new Error(`Resume state expects --max-file-bytes ${loadedMaxFileBytes}, got ${configuredMaxFileBytes}.`);
+        }
       }
-      this.resumeState = this.buildResumeState(oidField, loadedState);
-      this.resumeAfterOid = Number.isFinite(Number(loadedState.lastCompletedOid)) ? Number(loadedState.lastCompletedOid) : undefined;
-      (this.options as any).append = true;
+
+      if (loadedMode === 'single-file') {
+        normalizedState.outputBytes = await this.resolveSingleFileResumeBytes(normalizedState);
+        const desiredMaxFileBytes = this.getConfiguredMaxFileBytes();
+        if (desiredMaxFileBytes != null) {
+          normalizedState = await this.migrateSingleFileResumeToSegments(normalizedState, desiredMaxFileBytes);
+        }
+      }
+
+      this.resumeState = this.buildResumeState(oidField, normalizedState);
+      this.resumeAfterOid = Number.isFinite(Number(normalizedState.lastCompletedOid)) ? Number(normalizedState.lastCompletedOid) : undefined;
+      this.applyResumeWriterOptions(this.resumeState);
       if ((this.options as any)['oid-concurrency'] && Number((this.options as any)['oid-concurrency']) !== 1 && this.options.progress) {
         process.stderr.write('[resume] forcing oid-concurrency=1 for deterministic resume\n');
       }
       (this.options as any)['oid-concurrency'] = 1;
       (this.options as any)['id-list-threshold'] = Number.MAX_SAFE_INTEGER;
+      await this.saveResumeState();
       if (this.options.progress) {
         process.stderr.write(`[resume] resuming after OID ${this.resumeAfterOid ?? 0}\n`);
       }
     } else {
-      if (!overwrite && outputExists) {
-        throw new Error(`Output already exists: ${this.options.output}. For resume mode, keep the matching state file or use --overwrite to start fresh.`);
-      }
       (this.options as any)['oid-concurrency'] = 1;
       (this.options as any)['id-list-threshold'] = Number.MAX_SAFE_INTEGER;
       this.resumeAfterOid = undefined;
-      this.resumeState = this.buildResumeState(oidField);
+      this.resumeState = this.buildResumeState(oidField, {
+        outputMode: this.getConfiguredMaxFileBytes() ? 'segmented' : 'single-file',
+        outputBytes: 0,
+        segmentIndex: this.getConfiguredMaxFileBytes() ? 0 : undefined,
+        maxFileBytes: this.getConfiguredMaxFileBytes(),
+      });
       await this.saveResumeState();
     }
   }
@@ -317,6 +500,7 @@ export default class EsriQuery {
     const nextRecordsWritten = Number(this.resumeState.recordsWritten ?? 0) + Math.max(0, acceptedCount);
     this.resumeState = this.buildResumeState(this.resumeState.oidField, {
       ...this.resumeState,
+      ...this.getWriterResumeStatePatch(),
       lastCompletedOid,
       recordsWritten: nextRecordsWritten,
       completed: false,
@@ -483,29 +667,38 @@ export default class EsriQuery {
       await this.writer.open();
       if (this.options.progress) {
         const total = this.totalFeatureCount || 0;
+        const resumedRecords = Number(this.resumeState?.recordsWritten ?? 0);
+        if (resumedRecords > 0) {
+          this.writer.status.records = resumedRecords;
+          process.stderr.write(`[resume] checkpoint ${resumedRecords}${total ? `/${total}` : ''}\n`);
+        }
         this.writer.progressEvery = Math.max(1, Math.floor(Math.max(1, total) / 100));
         const t0 = Date.now();
         let lastStatus = t0;
+        const showCompactProgress = resumedRecords === 0;
         this.writer.onProgress = ({ records, invalid, skipped }) => {
           // Compact [0....10] style progress
-          if (records === 1) process.stderr.write('[0');
-          if (this.dotSplits.includes(records)) process.stderr.write('.');
-          const tenIndex = this.numSplits.indexOf(records);
-          if (tenIndex > -1) process.stderr.write(String(tenIndex + 1));
-          if (total && records === total) process.stderr.write('10]\n');
+          if (showCompactProgress) {
+            if (records === 1) process.stderr.write('[0');
+            if (this.dotSplits.includes(records)) process.stderr.write('.');
+            const tenIndex = this.numSplits.indexOf(records);
+            if (tenIndex > -1) process.stderr.write(String(tenIndex + 1));
+            if (total && records === total) process.stderr.write('10]\n');
+          }
 
           // Periodic status line with rates and ETA (every ~5s)
           const now = Date.now();
           if (now - lastStatus >= 5000) {
             const elapsed = (now - t0) / 1000;
-            const rate = elapsed > 0 ? (records / elapsed) : 0;
+            const runRecords = Math.max(0, records - resumedRecords);
+            const rate = elapsed > 0 ? (runRecords / elapsed) : 0;
             const remaining = total > 0 ? Math.max(0, total - records) : 0;
             const etaSec = rate > 0 && remaining > 0 ? Math.round(remaining / rate) : 0;
             const fmt = (s: number) => {
               const m = Math.floor(s / 60); const ss = s % 60; return m > 0 ? `${m}m${String(ss).padStart(2, '0')}s` : `${ss}s`;
             };
             const pct = total > 0 ? Math.floor((records / total) * 100) : 0;
-            process.stderr.write(`\n[progress] ${records}${total ? `/${total}` : ''} ${total ? `(${pct}%)` : ''} @ ${rate.toFixed(1)}/s, eta ${etaSec ? fmt(etaSec) : '—'}, invalid=${invalid}, skipped=${skipped}\n`);
+            process.stderr.write(`\n[progress] ${records}${total ? `/${total}` : ''} ${total ? `(${pct}%)` : ''}, +${runRecords} this run @ ${rate.toFixed(1)}/s, eta ${etaSec ? fmt(etaSec) : '—'}, invalid=${invalid}, skipped=${skipped}\n`);
             lastStatus = now;
           }
         };
@@ -521,6 +714,7 @@ export default class EsriQuery {
       if (this.resumeState) {
         this.resumeState = this.buildResumeState(this.resumeState.oidField, {
           ...this.resumeState,
+          ...this.getWriterResumeStatePatch(),
           completed: true,
           recordsWritten: this.resumeState.recordsWritten,
           lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
@@ -675,6 +869,7 @@ export default class EsriQuery {
         this._lastWrite = this._lastWrite.then(async () => {
           const accepted = await this.writeBatchFromArcgis(batch as any);
           if (batchMaxOid != null) {
+            await this.writer.save();
             this.resumeAfterOid = batchMaxOid;
             await this.recordResumeProgress(batchMaxOid, accepted ?? 0);
           }

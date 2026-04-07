@@ -99,6 +99,15 @@ type ResumeState = {
   updatedAt: string;
 };
 
+export type EsriQueryProgressSnapshot = {
+  featureCount: number;
+  totalFeatureCount?: number;
+  resumeStatePath?: string;
+  lastCompletedOid?: number;
+  checkpointRecordsWritten?: number;
+  completed?: boolean;
+};
+
 const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
 
 export type EsriFeatureType = {
@@ -304,6 +313,17 @@ export default class EsriQuery {
       completed: false,
     });
     await this.saveResumeState();
+  }
+
+  getProgressSnapshot(): EsriQueryProgressSnapshot {
+    return {
+      featureCount: Number(this.runtimeParams.featureCount || 0),
+      totalFeatureCount: this.totalFeatureCount,
+      resumeStatePath: this.resumeStatePath,
+      lastCompletedOid: this.resumeAfterOid ?? this.resumeState?.lastCompletedOid,
+      checkpointRecordsWritten: this.resumeState?.recordsWritten,
+      completed: this.resumeState?.completed,
+    };
   }
 
   private requestStop(reason: 'max-records' | 'write-error') {

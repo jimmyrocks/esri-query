@@ -220,6 +220,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   let totalFeatures = 0;
   const started = Date.now();
+  let hadErrors = false;
 
   for (let idx = 0; idx < jobs.length; idx++) {
     const job: ExtractJob = jobs[idx] as ExtractJob;
@@ -258,8 +259,9 @@ export async function main(argv = process.argv.slice(2)) {
         !(validatedMerged.output.endsWith('.parquet') || validatedMerged.output.endsWith('.gpq'))) {
       process.stderr.write(`[warn] ${label}: output extension should be ".parquet" or ".gpq" for geoparquet format (got "${validatedMerged.output}")\n`);
     }
+    let Query: EsriQuery | undefined;
     try {
-      const Query = new EsriQuery(validatedMerged as EsriQueryOptions);
+      Query = new EsriQuery(validatedMerged as EsriQueryOptions);
       const result = await Query.start() as any;
       totalFeatures += (result?.featureCount ?? 0);
       if ((options as any).progress) {
@@ -268,14 +270,33 @@ export async function main(argv = process.argv.slice(2)) {
         );
       }
     } catch (error) {
+      hadErrors = true;
       process.stderr.write(`[${idx + 1}/${jobs.length}] Error: ${(error as Error).message}\n`);
+      const snapshot = Query?.getProgressSnapshot?.();
+      const committedThisRun = Number(snapshot?.featureCount ?? 0);
+      if (committedThisRun > 0) {
+        totalFeatures += committedThisRun;
+      }
+      if (snapshot?.lastCompletedOid != null) {
+        const cumulative = Number(snapshot?.checkpointRecordsWritten ?? committedThisRun);
+        const statePath = snapshot?.resumeStatePath ?? '(unknown state file)';
+        process.stderr.write(
+          `[${idx + 1}/${jobs.length}] Resume checkpoint: last completed OID ${snapshot.lastCompletedOid}; committed this run ${committedThisRun}; checkpoint total ${cumulative}; state ${statePath}\n`
+        );
+      } else if (committedThisRun > 0) {
+        process.stderr.write(`[${idx + 1}/${jobs.length}] Partial progress: committed ${committedThisRun} feature(s) before failure\n`);
+      }
       process.exitCode = 1;
     }
   }
 
   if ((options as any).progress) {
     const secs = Math.round((Date.now() - started) / 1000);
-    process.stderr.write(`\nAll jobs finished. Total features: ${totalFeatures}. Elapsed: ${secs}s\n`);
+    if (hadErrors) {
+      process.stderr.write(`\nRun ended with errors. Committed features: ${totalFeatures}. Elapsed: ${secs}s\n`);
+    } else {
+      process.stderr.write(`\nAll jobs finished. Committed features: ${totalFeatures}. Elapsed: ${secs}s\n`);
+    }
   }
   if (process.exitCode === undefined) process.exitCode = 0;
 }

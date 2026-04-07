@@ -74,9 +74,9 @@ Use a session cookie or other custom header:
 esri-query -u <layer-url> -W "1=1" --header "Cookie: SESSION=abc123" -t geojson -o out.geojson
 ```
 
-If your service is secured by cookies, pass the cookie back as a `Cookie` request header. `Set-Cookie` is the response header the server sends to the client, so it is not what you pass to `esri-query`.
+If your service is secured by cookies, pass the cookie back as a `Cookie` request header.
 
-Resume a long-running NDJSON export after refreshing an expiring cookie:
+Resume a long-running NDJSON/geojsonseq export after refreshing an expiring cookie:
 
 ```bash
 esri-query \
@@ -89,6 +89,24 @@ esri-query \
 ```
 
 If the cookie expires mid-run, update the `Cookie` header and rerun the same command. `esri-query` will read `out.resume.json`, append to `out.geojsonl`, and continue after the last committed OID.
+
+After a failure:
+1. Do not delete `out.geojsonl` or `out.resume.json`.
+2. If the session expired, replace the cookie value in `--header "Cookie: ..."` or in your YAML `headers.Cookie`.
+3. Rerun the same job with the same `--output` and `--resume-state` paths.
+4. Check the error output for the resume checkpoint line. It prints the last committed OID and the checkpoint file path.
+
+Example rerun with a new cookie:
+
+```bash
+esri-query \
+  -u <layer-url> \
+  -W "1=1" \
+  -t geojsonseq \
+  -o out.geojsonl \
+  --resume-state out.resume.json \
+  --header "Cookie: SESSION=new-cookie-value"
+```
 
 S3 output (GeoParquet, FlatGeobuf):
 

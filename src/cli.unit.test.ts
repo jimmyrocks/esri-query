@@ -3,21 +3,30 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from './cli.js';
+import EsriQuery from './readers/esriQuery.js';
 
 describe('CLI main', () => {
   const logs: string[] = [];
+  const stderr: string[] = [];
   let logSpy: ReturnType<typeof jest.spyOn>;
+  let stderrSpy: ReturnType<typeof jest.spyOn>;
 
   beforeEach(() => {
     logs.length = 0;
+    stderr.length = 0;
     process.exitCode = undefined;
     logSpy = jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       logs.push(args.map(arg => String(arg)).join(' '));
     });
+    stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(((chunk: any) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as any);
   });
 
   afterEach(() => {
     logSpy.mockRestore();
+    stderrSpy.mockRestore();
     process.exitCode = undefined;
   });
 
@@ -97,5 +106,44 @@ describe('CLI main', () => {
       'X-Test': 'value:with:colon',
     });
     expect(payload.jobs[0].header).toBeUndefined();
+  });
+
+  it('prints resume checkpoint details when a resumable job fails', async () => {
+    const originalStart = EsriQuery.prototype.start;
+    const originalSnapshot = EsriQuery.prototype.getProgressSnapshot;
+
+    EsriQuery.prototype.start = async function () {
+      (this as any).runtimeParams.featureCount = 37;
+      throw new Error('Error preforming query operation');
+    };
+    EsriQuery.prototype.getProgressSnapshot = function () {
+      return {
+        featureCount: 37,
+        lastCompletedOid: 12345,
+        checkpointRecordsWritten: 10037,
+        resumeStatePath: 'out.resume.json',
+      } as any;
+    };
+
+    try {
+      await main([
+        '--url', 'https://example.com/arcgis/rest/services/Sample/FeatureServer/0',
+        '--where', '1=1',
+        '--format', 'geojsonseq',
+        '--output', 'out.geojsonl',
+        '--resume-state', 'out.resume.json',
+        '--progress',
+      ]);
+    } finally {
+      EsriQuery.prototype.start = originalStart;
+      EsriQuery.prototype.getProgressSnapshot = originalSnapshot;
+    }
+
+    const text = stderr.join('');
+    expect(process.exitCode).toBe(1);
+    expect(text).toContain('[1/1] Error: Error preforming query operation');
+    expect(text).toContain('Resume checkpoint: last completed OID 12345; committed this run 37; checkpoint total 10037; state out.resume.json');
+    expect(text).toContain('Run ended with errors. Committed features: 37.');
+    expect(text).not.toContain('All jobs finished.');
   });
 });

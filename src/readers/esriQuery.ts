@@ -81,6 +81,8 @@ export type EsriQueryOptions = {
   token?: string;
   header?: string | string[];
   headers?: string | string[] | Record<string, string | number | boolean>;
+  'fetch-log'?: string;
+  fetchLog?: string;
   'resume-state'?: string;
   'oid-field'?: string;
   oidField?: string;
@@ -649,10 +651,11 @@ export default class EsriQuery {
    * @returns A promise containing the Esri Feature Layer
    */
   async getSourceInfo() {
+    const fetchLogPath = (this.options as any)['fetch-log'] ?? (this.options as any).fetchLog;
     // Fetch source info and feature count in parallel
     const [source, countResult] = await Promise.all([
-      post(this.options.url, { f: 'json' }, { headers: this.extraHeaders }) as Promise<EsriFeatureLayerType>,
-      post(this.queryUrl, { ...this.whereObj, returnCountOnly: true }, { headers: this.extraHeaders })
+      post(this.options.url, { f: 'json' }, { headers: this.extraHeaders, fetchLogPath }) as Promise<EsriFeatureLayerType>,
+      post(this.queryUrl, { ...this.whereObj, returnCountOnly: true }, { headers: this.extraHeaders, fetchLogPath })
     ]);
 
     // Process fields
@@ -987,6 +990,7 @@ export default class EsriQuery {
       extraHeaders: this.extraHeaders,
       resumeAfterOid: this.resumeAfterOid,
       stableOidOrder: Boolean(this.resumeStatePath),
+      fetchLog: (this.options as any)['fetch-log'] ?? (this.options as any).fetchLog,
     });
 
     let lastRetriesPrinted = 0;

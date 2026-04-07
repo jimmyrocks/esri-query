@@ -18,6 +18,7 @@ export type CliBaseOptionsType = {
   'feature-count': number,
   json: boolean,
   progress: boolean,
+  'fetch-log'?: string,
   'no-bbox': boolean,
   'dry-run': boolean,
   'print-format'?: 'yaml' | 'json',

@@ -123,6 +123,20 @@ describe('CLI main', () => {
     expect(payload.jobs[0]['max-file-bytes']).toBe(500000000);
   });
 
+  it('accepts --fetch-log for dry-runs', async () => {
+    await main([
+      '--dry-run',
+      '--print-format', 'json',
+      '--url', 'https://example.com/arcgis/rest/services/Sample/FeatureServer/0',
+      '--where', '1=1',
+      '--fetch-log', 'fetch.jsonl',
+    ]);
+
+    const payload = JSON.parse(logs.join('\n'));
+    expect(process.exitCode).toBe(0);
+    expect(payload.jobs[0]['fetch-log']).toBe('fetch.jsonl');
+  });
+
   it('prints resume checkpoint details when a resumable job fails', async () => {
     const originalStart = EsriQuery.prototype.start;
     const originalSnapshot = EsriQuery.prototype.getProgressSnapshot;

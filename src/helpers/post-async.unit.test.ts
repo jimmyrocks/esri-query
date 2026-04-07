@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, jest, test } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const postMock = jest.fn();
 const getMock = jest.fn();
@@ -13,9 +16,17 @@ jest.unstable_mockModule('ky', () => ({
 const { default: postAsync } = await import('./post-async.js');
 
 describe('post-async pbf/json fallback behavior', () => {
+  const tempDirs: string[] = [];
+
   beforeEach(() => {
     postMock.mockReset();
     getMock.mockReset();
+  });
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test('accepts valid JSON payloads on pbf requests without GET fallback', async () => {
@@ -104,5 +115,38 @@ describe('post-async pbf/json fallback behavior', () => {
         }),
       }),
     );
+  });
+
+  test('writes fetch-log records with ArcGIS error details from success envelopes', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-fetch-log-'));
+    tempDirs.push(tempDir);
+    const fetchLogPath = join(tempDir, 'fetch.jsonl');
+
+    postMock.mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: { code: 498, message: 'Invalid token.', details: ['Token Required'] } }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      },
+    ));
+
+    await expect(postAsync('https://example.com/FeatureServer/0/query', {
+      f: 'json',
+      where: '1=1',
+      outFields: '*',
+      returnGeometry: true,
+    } as any, {
+      fetchLogPath,
+    })).rejects.toThrow('Invalid token. | Token Required');
+
+    const lines = readFileSync(fetchLogPath, 'utf8').trim().split('\n').filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    const entry = JSON.parse(lines[lines.length - 1]);
+    expect(entry.url).toBe('https://example.com/FeatureServer/0/query');
+    expect(entry.transport).toBe('post');
+    expect(entry.outcome).toBe('arcgis-error');
+    expect(entry.arcgisErrorCode).toBe(498);
+    expect(entry.arcgisErrorMessage).toBe('Invalid token.');
+    expect(entry.arcgisErrorDetails).toEqual(['Token Required']);
   });
 });

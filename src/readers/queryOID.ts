@@ -77,6 +77,7 @@ export interface QueryOptions {
   extraHeaders?: Record<string, string>;
   resumeAfterOid?: number;                  // skip any OIDs <= this value
   stableOidOrder?: boolean;                 // sort objectIds ascending before slicing
+  fetchLog?: string;                        // optional JSONL request log
 }
 
 // -------------------------------
@@ -224,7 +225,11 @@ export default abstract class QueryToolBase extends EventEmitter {
         // eslint-disable-next-line no-console
         console.error('[query] POST', url, JSON.stringify(q).slice(0, 200) + (JSON.stringify(q).length > 200 ? '…' : ''));
       }
-      return await postAsyncHelper(url, q as any, { signal: combined, headers: this.options.extraHeaders });
+      return await postAsyncHelper(url, q as any, {
+        signal: combined,
+        headers: this.options.extraHeaders,
+        fetchLogPath: this.options.fetchLog,
+      });
     });
   }
 

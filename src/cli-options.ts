@@ -43,6 +43,7 @@ export const optionDefinitions: OptionDef[] = [
   { name: 'oid-window', type: Number, description: 'OID range scan initial window size (default 5000)', group: 'base' },
   { name: 'format', alias: 't', type: String, description: 'Output format (geojson, esrijson, geojsonseq, gpkg, flatgeobuf, geoparquet)', group: 'base' },
   { name: 'progress', alias: 'p', type: Boolean, description: 'Show progress', group: 'base' },
+  { name: 'fetch-log', type: String, description: 'Write one JSON record per HTTP attempt to this file', group: 'base' },
   { name: 'max-file-bytes', type: Number, description: 'GeoJSONSeq: roll output into .partNNNN files after this many bytes', group: 'base' },
   { name: 'resume-state', type: String, description: 'Path to a JSON checkpoint file for resumable geojsonseq exports', group: 'base' },
   { name: 'parquetScanRows', alias: 'S', type: Number, description: 'GeoParquet: lookahead rows for schema inference (default 1000)', group: 'base' },
@@ -82,6 +83,7 @@ export const jobSchema = z.object({
   output: z.string().optional(),
   format: z.enum(['geojson', 'esrijson', 'geojsonseq', 'gpkg', 'flatgeobuf', 'geoparquet']).optional(),
   progress: z.boolean().optional(),
+  'fetch-log': z.string().optional(),
   'max-file-bytes': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'resume-state': z.string().optional(),
   'max-records': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
@@ -129,6 +131,7 @@ export type CliBaseOptionsType = {
   output?: string;
   format?: 'geojson' | 'esrijson' | 'geojsonseq' | 'gpkg' | 'flatgeobuf' | 'geoparquet';
   progress?: boolean;
+  'fetch-log'?: string;
   'max-file-bytes'?: number;
   'resume-state'?: string;
   'max-records'?: number;

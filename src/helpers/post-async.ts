@@ -4,6 +4,7 @@ import ky from 'ky';
 
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
+import { appendFile, mkdir } from 'fs/promises';
 import { dirname, resolve as resolvePath } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,6 +17,78 @@ const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 function dlog(...args: any[]) {
   if (process.env.DEBUG_ESRI_QUERY) console.error('[post-async]', ...args);
+}
+
+function truncateForLog(value: string, max = 500): string {
+  return value.length > max ? `${value.slice(0, max)}...` : value;
+}
+
+function extractArcgisError(payload: any): { code?: string | number; message?: string; details?: string[] } | undefined {
+  const error = payload?.error ?? payload;
+  if (!error || typeof error !== 'object') return undefined;
+  const message = typeof error.message === 'string' && error.message.trim() ? error.message.trim() : undefined;
+  const details = Array.isArray(error.details)
+    ? error.details.map((entry: unknown) => String(entry)).filter(Boolean)
+    : undefined;
+  const code = error.code;
+  if (message == null && !details?.length && code == null) return undefined;
+  return { code, message, details };
+}
+
+function formatArcgisErrorMessage(payload: any, fallback: string): string {
+  const info = extractArcgisError(payload);
+  if (!info) return fallback;
+  const parts = [info.message || fallback, ...(info.details ?? [])].filter(Boolean);
+  return parts.join(' | ');
+}
+
+function summarizeQuery(query: Record<string, unknown>): Record<string, unknown> {
+  const objectIdsRaw = String(query.objectIds ?? '').trim();
+  const objectIds = objectIdsRaw ? objectIdsRaw.split(',').map((id) => id.trim()).filter(Boolean) : [];
+  const where = typeof query.where === 'string' && query.where.trim() ? truncateForLog(query.where.trim(), 240) : undefined;
+  return {
+    f: query.f,
+    where,
+    returnIdsOnly: Boolean(query.returnIdsOnly),
+    returnCountOnly: Boolean(query.returnCountOnly),
+    objectIdsCount: objectIds.length || undefined,
+    objectIdsPreview: objectIds.length ? truncateForLog(objectIds.slice(0, 8).join(','), 160) : undefined,
+    outFields: typeof query.outFields === 'string' ? truncateForLog(query.outFields, 160) : undefined,
+    outStatisticsCount: Array.isArray(query.outStatistics) ? query.outStatistics.length : undefined,
+  };
+}
+
+function buildQueryStringPreview(params: URLSearchParams): string {
+  const clone = new URLSearchParams(params);
+  if (clone.has('token')) clone.set('token', '[redacted]');
+  if (clone.has('objectIds')) {
+    const ids = String(clone.get('objectIds') || '').split(',').filter(Boolean);
+    if (ids.length > 8) clone.set('objectIds', `${ids.slice(0, 8).join(',')},...(${ids.length} ids)`);
+  }
+  return truncateForLog(clone.toString(), 500);
+}
+
+function redactUrlForLog(value: string | URL): string {
+  try {
+    const url = new URL(String(value));
+    if (url.searchParams.has('token')) url.searchParams.set('token', '[redacted]');
+    return truncateForLog(url.toString(), 500);
+  } catch {
+    return truncateForLog(String(value).replace(/([?&]token=)[^&]*/i, '$1[redacted]'), 500);
+  }
+}
+
+async function writeFetchLog(fetchLogPath: string | undefined, record: Record<string, unknown>): Promise<void> {
+  if (!fetchLogPath) return;
+  try {
+    await mkdir(dirname(fetchLogPath), { recursive: true });
+    await appendFile(fetchLogPath, JSON.stringify({
+      ts: new Date().toISOString(),
+      ...record,
+    }) + '\n', 'utf8');
+  } catch (err) {
+    dlog('fetch-log write failed', err);
+  }
 }
 
 class EsriHttpError extends Error {
@@ -121,6 +194,8 @@ async function tryGetFallback(
   params: URLSearchParams,
   headers?: Record<string, string>,
   signal?: AbortSignal,
+  fetchLogPath?: string,
+  logBase?: Record<string, unknown>,
 ): Promise<any | undefined> {
   try {
     const u = new URL(String(url));
@@ -139,6 +214,22 @@ async function tryGetFallback(
     const getIsJson = JSON_CTYPE_RE.test(getCtype) || /text\/plain/i.test(getCtype);
     const raw = await getRes.text();
     const text = stripBom(raw);
+    const getParsed = getIsJson
+      ? (() => { try { return JSON.parse(text); } catch { return undefined; } })()
+      : undefined;
+    await writeFetchLog(fetchLogPath, {
+      ...logBase,
+      transport: 'get-fallback',
+      method: 'GET',
+      requestUrl: redactUrlForLog(u),
+      status: getStatus,
+      contentType: getCtype,
+      queryStringPreview: truncateForLog(u.search.slice(1), 500),
+      outcome: getStatus >= 200 && getStatus < 300 ? 'response' : 'http-error',
+      arcgisErrorCode: extractArcgisError(getParsed)?.code,
+      arcgisErrorMessage: extractArcgisError(getParsed)?.message,
+      arcgisErrorDetails: extractArcgisError(getParsed)?.details,
+    });
 
     if (getStatus >= 200 && getStatus < 300 && getIsJson && !looksLikeHtml(text)) {
       try { return JSON.parse(text); } catch { /* fall through */ }
@@ -154,6 +245,22 @@ async function tryGetFallback(
       debugLogHeaders(r2);
       const t2 = stripBom(await r2.text());
       const ct2 = r2.headers.get('content-type') || '';
+      const parsed = (/json|x-?json|pjson|text\/plain/i.test(ct2) && !looksLikeHtml(t2))
+        ? (() => { try { return JSON.parse(t2); } catch { return undefined; } })()
+        : undefined;
+      await writeFetchLog(fetchLogPath, {
+        ...logBase,
+        transport: 'get-fallback-pjson',
+        method: 'GET',
+        requestUrl: redactUrlForLog(u),
+        status: r2.status,
+        contentType: ct2,
+        queryStringPreview: truncateForLog(u.search.slice(1), 500),
+        outcome: r2.status >= 200 && r2.status < 300 ? 'response' : 'http-error',
+        arcgisErrorCode: extractArcgisError(parsed)?.code,
+        arcgisErrorMessage: extractArcgisError(parsed)?.message,
+        arcgisErrorDetails: extractArcgisError(parsed)?.details,
+      });
       const j2 = /json|x-?json|pjson|text\/plain/i.test(ct2) && !looksLikeHtml(t2) ? JSON.parse(t2) : undefined;
       if (r2.status >= 200 && r2.status < 300 && j2 !== undefined) return j2;
       try { if (j2 !== undefined) return j2; } catch {}
@@ -164,6 +271,14 @@ async function tryGetFallback(
       try { return JSON.parse(text); } catch { /* ignore */ }
     }
   } catch (gfErr) {
+    await writeFetchLog(fetchLogPath, {
+      ...logBase,
+      transport: 'get-fallback',
+      method: 'GET',
+      requestUrl: redactUrlForLog(url),
+      outcome: 'network-error',
+      errorMessage: String((gfErr as Error)?.message || gfErr),
+    });
     if (process.env.DEBUG_ESRI_QUERY) {
       // eslint-disable-next-line no-console
       console.error('[post-async] GET fallback failed', gfErr);
@@ -182,11 +297,12 @@ async function tryGetFallback(
 export default async function postAsync(
   url: string | URL,
   query: EsriQueryObjectType,
-  options?: { signal?: AbortSignal; headers?: Record<string, string> }
+  options?: { signal?: AbortSignal; headers?: Record<string, string>; fetchLogPath?: string }
 ): Promise<unknown> {
   const normalizedUrl = String(url);
   const format = (query as any).f;
   const signal = options?.signal;
+  const fetchLogPath = options?.fetchLogPath ?? process.env.ESRIQ_FETCH_LOG;
 
   if (signal?.aborted) {
     const err = new EsriHttpError('Aborted');
@@ -196,9 +312,17 @@ export default async function postAsync(
 
   const headers = buildHeaders(format, options?.headers);
   const body = toSearchParams(query as unknown as Record<string, unknown>);
+  const querySummary = summarizeQuery(query as unknown as Record<string, unknown>);
+  const logBase = {
+    url: redactUrlForLog(normalizedUrl),
+    requestUrl: redactUrlForLog(normalizedUrl),
+    format,
+    query: querySummary,
+    queryStringPreview: buildQueryStringPreview(body),
+  };
 
   if (process.env.ESRI_QUERY_GET_FIRST === '1') {
-    const early = await tryGetFallback(normalizedUrl, body, headers, signal);
+    const early = await tryGetFallback(normalizedUrl, body, headers, signal, fetchLogPath, logBase);
     if (early !== undefined) {
       dlog('GET-first succeeded');
       return early;
@@ -231,6 +355,15 @@ export default async function postAsync(
     const err = new EsriHttpError(e?.message || String(e));
     (err as any).status = (e?.response?.status ?? 0);
     err.code = (signal?.aborted ? 'ABORT' : (e?.name === 'TimeoutError' ? 'RETRY' : (e?.code || 'RETRY')));
+    await writeFetchLog(fetchLogPath, {
+      ...logBase,
+      transport: 'post',
+      method: 'POST',
+      outcome: 'network-error',
+      status: (e?.response?.status ?? 0),
+      errorCode: err.code,
+      errorMessage: err.message,
+    });
     throw err;
   }
 
@@ -239,7 +372,17 @@ export default async function postAsync(
   const retryAfterMs = parseRetryAfter(res.headers);
 
   // 204 No Content → return empty object
-  if (status === 204) return {};
+  if (status === 204) {
+    await writeFetchLog(fetchLogPath, {
+      ...logBase,
+      transport: 'post',
+      method: 'POST',
+      status,
+      contentType: res.headers.get('content-type') || '',
+      outcome: 'no-content',
+    });
+    return {};
+  }
 
   if (format === 'pbf') {
     // Read raw bytes
@@ -257,11 +400,33 @@ export default async function postAsync(
         try { j = JSON.parse(Buffer.from(bytes).toString('utf8')); } catch {}
         if (j !== undefined) {
           if (j?.error) {
-            const err = new EsriHttpError(j?.error?.message || 'Output format not supported.');
+            const err = new EsriHttpError(formatArcgisErrorMessage(j, 'Output format not supported.'));
             err.status = status; err.headers = headersObj; err.body = j; err.code = 'FORMAT_UNSUPPORTED';
             (err as any).debug = { url: normalizedUrl, format, hint: 'pbf POST JSON error' };
+            await writeFetchLog(fetchLogPath, {
+              ...logBase,
+              transport: 'post',
+              method: 'POST',
+              status,
+              contentType: ctype,
+              outcome: 'arcgis-error',
+              errorCode: err.code,
+              errorMessage: err.message,
+              arcgisErrorCode: extractArcgisError(j)?.code,
+              arcgisErrorMessage: extractArcgisError(j)?.message,
+              arcgisErrorDetails: extractArcgisError(j)?.details,
+              hint: (err as any).debug?.hint,
+            });
             throw err;
           }
+          await writeFetchLog(fetchLogPath, {
+            ...logBase,
+            transport: 'post',
+            method: 'POST',
+            status,
+            contentType: ctype,
+            outcome: 'success-json-on-pbf',
+          });
           return j;
         }
       }
@@ -277,14 +442,24 @@ export default async function postAsync(
         try { return existsSync(p); } catch { return false; }
       }) || candidates[0];
       try {
-        return esriPbf(bytes, protoPath);
+        const decoded = await esriPbf(bytes, protoPath);
+        await writeFetchLog(fetchLogPath, {
+          ...logBase,
+          transport: 'post',
+          method: 'POST',
+          status,
+          contentType: ctype,
+          outcome: 'success-pbf',
+          featuresReturned: Array.isArray((decoded as any)?.features) ? (decoded as any).features.length : undefined,
+        });
+        return decoded;
       } catch (e: any) {
         // If protobuf parsing fails, expose a friendly hint and mark format unsupported
         const err = e instanceof Error ? new EsriHttpError(e.message) : new EsriHttpError(String(e));
         err.status = status; err.headers = headersObj; err.code = 'FORMAT_UNSUPPORTED';
         (err as any).debug = { url: normalizedUrl, format, hint: 'pbf parse failure' };
         // Also try GET fallback once (some servers only cooperate with GET)
-        const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal);
+        const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal, fetchLogPath, logBase);
         if (getAttempt && (getAttempt.error || getAttempt.features || getAttempt.results)) {
           // Still JSON-ish → signal the caller to flip to JSON
           try {
@@ -293,8 +468,30 @@ export default async function postAsync(
               err.message += ' (hint: missing /query)';
             }
           } catch {}
+          await writeFetchLog(fetchLogPath, {
+            ...logBase,
+            transport: 'post',
+            method: 'POST',
+            status,
+            contentType: ctype,
+            outcome: 'pbf-parse-error',
+            errorCode: err.code,
+            errorMessage: err.message,
+            hint: (err as any).debug?.hint,
+          });
           throw err;
         }
+        await writeFetchLog(fetchLogPath, {
+          ...logBase,
+          transport: 'post',
+          method: 'POST',
+          status,
+          contentType: ctype,
+          outcome: 'pbf-parse-error',
+          errorCode: err.code,
+          errorMessage: err.message,
+          hint: (err as any).debug?.hint,
+        });
         throw err;
       }
     }
@@ -304,13 +501,27 @@ export default async function postAsync(
     if (isJsonCtype || looksLikeJson(bytes)) {
       try { bodyJson = JSON.parse(Buffer.from(bytes).toString('utf8')); } catch {}
     }
-    const perr = new EsriHttpError(bodyJson?.error?.message || `HTTP ${status}`);
+    const perr = new EsriHttpError(formatArcgisErrorMessage(bodyJson, `HTTP ${status}`));
     perr.status = status; perr.headers = headersObj; perr.body = bodyJson ?? { length: bytes.byteLength };
     if (RETRYABLE_STATUSES.has(status)) perr.code = 'RETRY';
     // ArcGIS-specific auth codes
     if (status === 498 || status === 499) perr.code = 'AUTH';
     if (status === 403 && (bodyJson?.error?.message || '').toLowerCase().includes('token')) perr.code = 'AUTH';
     if (retryAfterMs != null) perr.retryAfterMs = retryAfterMs;
+    await writeFetchLog(fetchLogPath, {
+      ...logBase,
+      transport: 'post',
+      method: 'POST',
+      status,
+      contentType: ctype,
+      outcome: 'http-error',
+      errorCode: perr.code,
+      errorMessage: perr.message,
+      retryAfterMs,
+      arcgisErrorCode: extractArcgisError(bodyJson)?.code,
+      arcgisErrorMessage: extractArcgisError(bodyJson)?.message,
+      arcgisErrorDetails: extractArcgisError(bodyJson)?.details,
+    });
     throw perr;
   }
 
@@ -326,7 +537,7 @@ export default async function postAsync(
       json = text && text.length ? JSON.parse(text) : {};
     } catch {
       // Try a GET fallback before declaring invalid JSON
-      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal);
+      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal, fetchLogPath, logBase);
       if (getAttempt !== undefined) {
         json = getAttempt;
       } else {
@@ -334,6 +545,17 @@ export default async function postAsync(
         jerr.code = 'EINVALIDJSON';
         jerr.status = status; jerr.headers = headersObj; jerr.body = text;
         (jerr as any).debug = { url: normalizedUrl, format, hint: 'json-invalid; tried GET fallback' };
+        await writeFetchLog(fetchLogPath, {
+          ...logBase,
+          transport: 'post',
+          method: 'POST',
+          status,
+          contentType: ctype,
+          outcome: 'invalid-json',
+          errorCode: jerr.code,
+          errorMessage: jerr.message,
+          hint: (jerr as any).debug?.hint,
+        });
         throw jerr;
       }
     }
@@ -348,6 +570,20 @@ export default async function postAsync(
         debugLogHeaders(res2);
         const t2 = stripBom(await res2.text());
         const ct2 = res2.headers.get('content-type') || '';
+        const parsed = (res2.status >= 200 && res2.status < 300 && (/json|x-?json|pjson|text\/plain/i.test(ct2)) && !looksLikeHtml(t2))
+          ? (() => { try { return JSON.parse(t2); } catch { return undefined; } })()
+          : undefined;
+        await writeFetchLog(fetchLogPath, {
+          ...logBase,
+          transport: 'post-pjson',
+          method: 'POST',
+          status: res2.status,
+          contentType: ct2,
+          outcome: res2.status >= 200 && res2.status < 300 ? 'response' : 'http-error',
+          arcgisErrorCode: extractArcgisError(parsed)?.code,
+          arcgisErrorMessage: extractArcgisError(parsed)?.message,
+          arcgisErrorDetails: extractArcgisError(parsed)?.details,
+        });
         if (res2.status >= 200 && res2.status < 300 && (/json|x-?json|pjson|text\/plain/i.test(ct2)) && !looksLikeHtml(t2)) {
           try { json = JSON.parse(t2); } catch {}
         }
@@ -356,10 +592,21 @@ export default async function postAsync(
 
     // Unexpected content type; attempt GET fallback once
     if (json === undefined) {
-      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal);
+      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal, fetchLogPath, logBase);
       if (getAttempt !== undefined) return getAttempt;
 
-      if (status >= 200 && status < 300) return { body: text, contentType: ctype };
+      if (status >= 200 && status < 300) {
+        await writeFetchLog(fetchLogPath, {
+          ...logBase,
+          transport: 'post',
+          method: 'POST',
+          status,
+          contentType: ctype,
+          outcome: 'unexpected-success-payload',
+          bodyPreview: truncateForLog(text, 240),
+        });
+        return { body: text, contentType: ctype };
+      }
       const herr = new EsriHttpError(`HTTP ${status}`);
       herr.status = status; herr.headers = headersObj; herr.body = text;
       if (RETRYABLE_STATUSES.has(status)) herr.code = 'RETRY';
@@ -368,6 +615,18 @@ export default async function postAsync(
       if (status === 403 && (json?.error?.message || '').toLowerCase().includes('token')) herr.code = 'AUTH';
       (herr as any).debug = { url: normalizedUrl, format, hint: 'unexpected content-type, no GET fallback' };
       if (retryAfterMs != null) herr.retryAfterMs = retryAfterMs;
+      await writeFetchLog(fetchLogPath, {
+        ...logBase,
+        transport: 'post',
+        method: 'POST',
+        status,
+        contentType: ctype,
+        outcome: 'http-error',
+        errorCode: herr.code,
+        errorMessage: herr.message,
+        hint: (herr as any).debug?.hint,
+        bodyPreview: truncateForLog(text, 240),
+      });
       throw herr;
     }
   }
@@ -375,20 +634,43 @@ export default async function postAsync(
   // Even on 2xx, ArcGIS may include an error envelope
   if (status >= 200 && status < 300) {
     if (json?.error) {
-      const aerr = new EsriHttpError(json.error.message || 'ArcGIS error in success response');
+      const aerr = new EsriHttpError(formatArcgisErrorMessage(json, 'ArcGIS error in success response'));
       aerr.status = status; aerr.headers = headersObj; aerr.body = json; aerr.code = json?.error?.code || 'ARCGIS_ERROR';
       (aerr as any).debug = { url: normalizedUrl, format, hint: 'ArcGIS error in success response' };
       const emsg = String(json?.error?.message || '').toLowerCase();
       if (json?.error?.code === 498 || json?.error?.code === 499 || emsg.includes('token')) {
         aerr.code = 'AUTH';
       }
+      await writeFetchLog(fetchLogPath, {
+        ...logBase,
+        transport: 'post',
+        method: 'POST',
+        status,
+        contentType: ctype,
+        outcome: 'arcgis-error',
+        errorCode: aerr.code,
+        errorMessage: aerr.message,
+        arcgisErrorCode: extractArcgisError(json)?.code,
+        arcgisErrorMessage: extractArcgisError(json)?.message,
+        arcgisErrorDetails: extractArcgisError(json)?.details,
+        hint: (aerr as any).debug?.hint,
+      });
       throw aerr;
     }
+    await writeFetchLog(fetchLogPath, {
+      ...logBase,
+      transport: 'post',
+      method: 'POST',
+      status,
+      contentType: ctype,
+      outcome: 'success-json',
+      featuresReturned: Array.isArray(json?.features) ? json.features.length : undefined,
+    });
     return json;
   }
 
   // Non-2xx JSON
-  const err = new EsriHttpError(json?.error?.message || json?.message || `HTTP ${status}`);
+  const err = new EsriHttpError(formatArcgisErrorMessage(json, json?.message || `HTTP ${status}`));
   err.status = status; err.code = json?.error?.code || status; err.headers = headersObj; err.body = json;
   (err as any).debug = { url: normalizedUrl, format, hint: 'non-2xx JSON error' };
   if (RETRYABLE_STATUSES.has(status)) err.code = 'RETRY';
@@ -396,6 +678,21 @@ export default async function postAsync(
   if (status === 498 || status === 499) err.code = 'AUTH';
   if (status === 403 && (json?.error?.message || '').toLowerCase().includes('token')) err.code = 'AUTH';
   if (retryAfterMs != null) err.retryAfterMs = retryAfterMs;
+  await writeFetchLog(fetchLogPath, {
+    ...logBase,
+    transport: 'post',
+    method: 'POST',
+    status,
+    contentType: ctype,
+    outcome: 'http-error',
+    errorCode: err.code,
+    errorMessage: err.message,
+    retryAfterMs,
+    arcgisErrorCode: extractArcgisError(json)?.code,
+    arcgisErrorMessage: extractArcgisError(json)?.message,
+    arcgisErrorDetails: extractArcgisError(json)?.details,
+    hint: (err as any).debug?.hint,
+  });
   throw err;
 
   // Defensive fallback (unreachable):

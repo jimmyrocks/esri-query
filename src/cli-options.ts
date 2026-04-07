@@ -55,6 +55,8 @@ export const optionDefinitions: OptionDef[] = [
   { name: 's3-sse', type: String, description: 'S3: server-side encryption (AES256 or aws:kms)', group: 'base' },
   { name: 's3-ssekms-key-id', type: String, description: 'S3: KMS key id/arn when using aws:kms', group: 'base' },
   { name: 'dedupe', alias: 'D', type: Boolean, description: 'De-duplicate features by hashing properties+geometry (memory heavy).', group: 'base' },
+  { name: 'dedupe-warn-entries', type: Number, description: 'Dedupe: warn when this many unique hashes are held in memory', group: 'base' },
+  { name: 'dedupe-max-entries', type: Number, description: 'Dedupe: fail safe after this many unique hashes are held in memory', group: 'base' },
   { name: 'max-records', alias: 'R', type: Number, description: 'Soft cap on number of features to write before terminating', group: 'base' },
   { name: 'on-invalid', alias: 'I', type: String, description: "How to handle invalid/malformed geometries: 'throw' | 'keep' | 'skip'", group: 'base' },
   { name: 'progress-every', alias: 'P', type: Number, description: 'Emit a progress tick every N accepted features (stderr).', group: 'base' },
@@ -89,6 +91,8 @@ export const jobSchema = z.object({
   'strict-geometry': z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
   'antimeridian-aware': z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
   dedupe: z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
+  'dedupe-warn-entries': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
+  'dedupe-max-entries': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   parquetScanRows: z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   
   'no-bbox': z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
@@ -141,6 +145,8 @@ export type CliBaseOptionsType = {
   'print-format'?: 'yaml' | 'json';
   'strict-geometry'?: boolean;
   'antimeridian-aware'?: boolean;
+  'dedupe-warn-entries'?: number;
+  'dedupe-max-entries'?: number;
 };
 
 export function parseExtraHeaders(value: unknown): Record<string, string> | undefined {

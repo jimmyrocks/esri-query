@@ -192,7 +192,9 @@ Query behavior:
 - `--on-invalid, -I` (throw | keep | skip): Handling for malformed geometry.
 - `--strict-geometry, -G` (bool): If false, tolerate malformed geometries.
 - `--antimeridian-aware, -A` (bool): Enable dateline-aware bbox when WKID 4326.
-- `--dedupe, -D` (bool): De-duplicate by hashing (memory heavy; off by default).
+- `--dedupe, -D` (bool): De-duplicate by hashing (memory heavy; off by default). The reader now warns and fails safe before the hash set grows without bound.
+- `--dedupe-warn-entries` (number): Dedupe warning threshold for unique hashes held in memory.
+- `--dedupe-max-entries` (number): Dedupe guardrail; fail safe after this many unique hashes are held in memory.
 
 OID strategy knobs:
 - `--oid-start` (number): Starting slice size (default 250).
@@ -267,6 +269,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `DEBUG_ESRI_QUERY=1`: verbose request/retry logs.
 - `DEBUG_ESRI_QUERY_HEADERS=1`: log headers.
 - `DEBUG_ESRI_PBF=1`: one-time PBF field/palette/attribute sample.
+- `ESRIQ_PBF_FORCE_GC=1`: opt-in manual GC after a full PBF decode when running with `node --expose-gc`; intended for debugging or constrained-memory runs, not normal throughput.
 
 ## Notes & Tips
 
@@ -281,6 +284,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `--overwrite` (`-y`): Overwrite existing output files. Applies to GPKG, GeoParquet, FlatGeobuf, and text writers.
 - `--parquetScanRows`: GeoParquet schema lookahead rows (default 1000) to infer column types (numbers/booleans/timestamps).
 - `--dedupe`: Opt-in feature de-duplication by hashing. Beware of memory on very large layers.
+- `--dedupe-warn-entries` / `--dedupe-max-entries`: Tune the in-memory dedupe guardrails when `--dedupe` is enabled.
 - `--token`: ArcGIS token for secured services (added to all requests).
 - `--header`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
 - `--max-file-bytes`: For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files instead of one large NDJSON file.
@@ -298,6 +302,7 @@ Other improvements:
 Debugging:
 - `DEBUG_ESRI_QUERY=1` for verbose request/retry info.
 - `DEBUG_ESRI_PBF=1` to print one-time PBF field/palette/attribute samples.
+- `ESRIQ_PBF_FORCE_GC=1` to opt into a single post-decode manual GC when running with `--expose-gc`.
 
 ## FlatGeobuf Example
 
@@ -342,6 +347,7 @@ The tool supports the following environment variables for debugging and troubles
 
 - `DEBUG_ESRI_QUERY`: Prints verbose debug information for requests, retries, headers, and more.
 - `DEBUG_ESRI_QUERY_HEADERS`: Logs request and response headers.
+- `ESRIQ_PBF_FORCE_GC`: Opts into a single post-decode manual GC for PBF decoding when `global.gc()` is exposed.
 - `NODE_DEBUG=esri-query`: An alternate Node debug namespace for low-level logging.
 
 These can be combined with `npm run start` or `node` commands to help diagnose issues.

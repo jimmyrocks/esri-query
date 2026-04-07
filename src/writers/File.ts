@@ -77,11 +77,13 @@ export default class File extends StreamWriter {
     private async reconcileSingleFileResume(outPath: string, checkpointBytes: number): Promise<void> {
         try {
             const current = await stat(outPath);
-            if (current.size < checkpointBytes) {
-                throw new Error(`Output is smaller than the saved checkpoint (${current.size} < ${checkpointBytes}).`);
-            }
-            if (current.size !== checkpointBytes) {
-                await truncate(outPath, checkpointBytes);
+            // Clamp checkpointBytes to actual file size: if the OS crashed between the
+            // kernel write buffer flush and the state-file save, the state may record
+            // more bytes than are actually on disk.  Truncating past EOF would pad with
+            // null bytes and corrupt the output.
+            const safeBytes = Math.min(checkpointBytes, current.size);
+            if (safeBytes !== current.size) {
+                await truncate(outPath, safeBytes);
             }
         } catch (err: any) {
             if (err?.code === 'ENOENT' && checkpointBytes === 0) return;

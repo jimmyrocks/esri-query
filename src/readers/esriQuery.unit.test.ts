@@ -1,4 +1,4 @@
-import { describe, expect, test } from '@jest/globals';
+import { describe, expect, test, jest } from '@jest/globals';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -160,6 +160,64 @@ describe('EsriQuery.startQuery', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].oidField).toBe('MY_OID');
     expect(captured[0].queryObjectBase.outFields).toBe('name,MY_OID');
+  });
+
+  test('serializes batch writes even when parallel fetches emit data back-to-back', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const started: number[] = [];
+    const completed: number[] = [];
+    let activeWrites = 0;
+    let maxConcurrentWrites = 0;
+    let releaseFirstWrite!: () => void;
+
+    (query as any).writeBatchFromArcgis = async (batch: Array<{ attributes?: Record<string, unknown> }>) => {
+      const id = Number(batch[0]?.attributes?.id);
+      started.push(id);
+      activeWrites += 1;
+      maxConcurrentWrites = Math.max(maxConcurrentWrites, activeWrites);
+      try {
+        if (id === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirstWrite = resolve;
+          });
+        }
+        completed.push(id);
+        return 1;
+      } finally {
+        activeWrites -= 1;
+      }
+    };
+
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      this.emit('data', [{ attributes: { id: 1 } }] as any);
+      this.emit('data', [{ attributes: { id: 2 } }] as any);
+    };
+
+    try {
+      await query.startQuery();
+      await Promise.resolve();
+
+      expect(started).toEqual([1]);
+      expect(completed).toEqual([]);
+      expect(maxConcurrentWrites).toBe(1);
+
+      releaseFirstWrite();
+      await (query as any)._lastWrite;
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(started).toEqual([1, 2]);
+    expect(completed).toEqual([1, 2]);
+    expect(maxConcurrentWrites).toBe(1);
   });
 
   test('creates a resume state file and forces deterministic OID mode for geojsonseq', async () => {
@@ -371,5 +429,77 @@ describe('EsriQuery.startQuery', () => {
     expect(existsSync(outputPath)).toBe(false);
     expect(existsSync(migratedPath)).toBe(true);
     expect(readFileSync(migratedPath, 'utf8')).toBe(firstLine);
+  });
+
+  test('warns once when dedupe tracking crosses the configured threshold', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      dedupe: true,
+      'dedupe-warn-entries': 1,
+      'dedupe-max-entries': 10,
+    } as any);
+
+    const stderr: string[] = [];
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(((chunk: any) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as any);
+    query.writer = {
+      status: {},
+      writeBatch: async (items: AsyncIterable<GeoJSON.Feature>) => {
+        let accepted = 0;
+        for await (const _ of items) accepted += 1;
+        return accepted;
+      },
+    } as any;
+
+    try {
+      await (query as any).writeBatchFromArcgis([{ attributes: { OBJECTID: 1 }, geometry: null }] as any);
+      await (query as any).writeBatchFromArcgis([{ attributes: { OBJECTID: 2 }, geometry: null }] as any);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const text = stderr.join('');
+    expect(text).toContain('--dedupe is tracking');
+    expect(text.match(/--dedupe is tracking/g)).toHaveLength(1);
+    expect(query.runtimeParams.dedupeHashCount).toBe(2);
+  });
+
+  test('fails before writing a batch when dedupe would exceed the configured max entries', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      dedupe: true,
+      'dedupe-max-entries': 1,
+      'dedupe-warn-entries': 1,
+    } as any);
+
+    const writeBatch = jest.fn(async (items: AsyncIterable<GeoJSON.Feature>) => {
+      let accepted = 0;
+      for await (const _ of items) accepted += 1;
+      return accepted;
+    });
+    query.writer = {
+      status: {},
+      writeBatch,
+    } as any;
+
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation((() => true) as any);
+    try {
+      await (query as any).writeBatchFromArcgis([{ attributes: { OBJECTID: 1 }, geometry: null }] as any);
+      expect(query.runtimeParams.dedupeHashCount).toBe(1);
+      expect(writeBatch).toHaveBeenCalledTimes(1);
+
+      await expect(
+        (query as any).writeBatchFromArcgis([{ attributes: { OBJECTID: 2 }, geometry: null }] as any)
+      ).rejects.toThrow('--dedupe exceeded the in-memory guardrail');
+
+      expect(query.runtimeParams.dedupeHashCount).toBe(1);
+      expect(writeBatch).toHaveBeenCalledTimes(1);
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });

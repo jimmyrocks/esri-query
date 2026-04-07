@@ -10,21 +10,31 @@ import type { EsriQueryObjectType } from '../helpers/esri-rest-types.js';
 // Minimal feature shape fallback if not provided by helpers
 type EsriFeatureType = { attributes: Record<string, unknown>; geometry?: unknown };
 
+const DEFAULT_RATE_BURST = 8;
+const DEFAULT_RATE_CAPACITY_PER_SEC = 8;
+
 // -------------------------------
 // Per-host limiter (shared bucket)
 // -------------------------------
-const limiterByHost: Map<string, Bottleneck> = new Map();
-function getLimiterForHost(host: string): Bottleneck {
-  const existing = limiterByHost.get(host);
+const limiterByHostProfile: Map<string, Bottleneck> = new Map();
+
+function coercePositiveInt(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function getLimiterForHost(host: string, options?: { rateBurst?: number; rateCapacityPerSec?: number }): Bottleneck {
+  const reservoir = coercePositiveInt(options?.rateBurst ?? process.env.ESRIQ_RATE_BURST, DEFAULT_RATE_BURST);
+  const perSec = coercePositiveInt(options?.rateCapacityPerSec ?? process.env.ESRIQ_RATE_PER_SEC, DEFAULT_RATE_CAPACITY_PER_SEC);
+  const cacheKey = `${host}|burst=${reservoir}|perSec=${perSec}`;
+  const existing = limiterByHostProfile.get(cacheKey);
   if (existing) return existing;
-  const reservoir = Number(process.env.ESRIQ_RATE_BURST ?? 8);
-  const perSec = Number(process.env.ESRIQ_RATE_PER_SEC ?? 8);
   const limiter = new Bottleneck({
     reservoir,
     reservoirRefreshAmount: perSec,
     reservoirRefreshInterval: 1000
   });
-  limiterByHost.set(host, limiter);
+  limiterByHostProfile.set(cacheKey, limiter);
   return limiter;
 }
 
@@ -43,7 +53,7 @@ export interface QueryOptions {
   // OID tuning knobs (optional; fall back to env when absent)
   oidStart?: number;            // starting slice size (default 250)
   oidConcurrency?: number;      // parallel slice workers (default 2)
-  idListThreshold?: number;     // when to switch to range-scan (default 500000)
+  idListThreshold?: number;     // when to switch to range-scan (default 200000; heap guard may switch earlier)
   oidWindow?: number;           // initial OID range scan window (default 5000)
   oidField?: string;            // object id field name from layer metadata
 
@@ -116,7 +126,10 @@ export default abstract class QueryToolBase extends EventEmitter {
     this._bboxWkid = options.bboxWkid;
 
     // Per-host limiter
-    this._limiter = getLimiterForHost(this._baseUrl.host);
+    this._limiter = getLimiterForHost(this._baseUrl.host, {
+      rateBurst: options.rateBurst,
+      rateCapacityPerSec: options.rateCapacityPerSec,
+    });
 
     // Circuit breaker
     this._cbreaker = new ConsecutiveBreaker(options.circuitThreshold ?? 4);

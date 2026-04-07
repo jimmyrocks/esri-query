@@ -6,6 +6,7 @@ import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-
 import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, truncate, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { getHeapStatistics } from 'node:v8';
 
 import Stdout from '../writers/Stdout.js';
 import Gpkg from '../writers/Gpkg.js';
@@ -84,6 +85,8 @@ export type EsriQueryOptions = {
   'oid-field'?: string;
   oidField?: string;
   'max-file-bytes'?: number;
+  'dedupe-warn-entries'?: number;
+  'dedupe-max-entries'?: number;
 };
 
 type ResumeOutputMode = 'single-file' | 'segmented';
@@ -97,6 +100,8 @@ type ResumeState = {
   output: string;
   format: 'geojsonseq';
   oidField: string;
+  outFields?: string;
+  bbox?: string;
   totalFeatureCount?: number;
   lastCompletedOid?: number;
   recordsWritten?: number;
@@ -118,6 +123,11 @@ export type EsriQueryProgressSnapshot = {
 };
 
 const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
+const DEFAULT_DEDUPE_WARN_ENTRIES = 250000;
+const DEFAULT_DEDUPE_MAX_ENTRIES = 1000000;
+const DEDUPE_ENTRY_ESTIMATED_BYTES = 128;
+const DEDUPE_HEAP_SHARE = 0.25;
+const MIN_DEDUPE_MAX_ENTRIES = 50000;
 
 export type EsriFeatureType = {
   'geometry'?: ArcGIS.Geometry,
@@ -140,12 +150,12 @@ export default class EsriQuery {
   totalFeatureCount: number;
   supportsPagination?: boolean; // retained for compatibility (unused)
   runtimeParams: {
-    hashList: Record<string, boolean>;
+    dedupeHashCount: number;
     featureCount: number;
     runTime: number;
   } = {
       featureCount: 0,
-      hashList: {},
+      dedupeHashCount: 0,
       runTime: 0
     };
 
@@ -163,6 +173,8 @@ export default class EsriQuery {
   private resumeState?: ResumeState;
   private resumeAfterOid?: number;
   private resumeOidField?: string;
+  private dedupeSeenHashes = new Set<string>();
+  private dedupeWarned = false;
 
   constructor(options: EsriQueryOptions) {
     this.options = options;
@@ -211,6 +223,68 @@ export default class EsriQuery {
     return Number.isFinite(raw) && raw > 0 ? raw : undefined;
   }
 
+  private getApproxAvailableHeapBytes(): number | undefined {
+    try {
+      const heapLimit = Number(getHeapStatistics().heap_size_limit || 0);
+      const heapUsed = Number(process.memoryUsage().heapUsed || 0);
+      if (!(heapLimit > 0) || !(heapUsed >= 0)) return undefined;
+      return Math.max(0, heapLimit - heapUsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getDedupeMaxEntries(): number {
+    const configured = Number((this.options as any)['dedupe-max-entries'] ?? process.env.ESRIQ_DEDUPE_MAX_ENTRIES);
+    if (Number.isFinite(configured) && configured > 0) return Math.floor(configured);
+
+    const available = this.getApproxAvailableHeapBytes();
+    if (typeof available === 'number' && available > 0) {
+      const derived = Math.floor((available * DEDUPE_HEAP_SHARE) / DEDUPE_ENTRY_ESTIMATED_BYTES);
+      return Math.max(MIN_DEDUPE_MAX_ENTRIES, Math.min(DEFAULT_DEDUPE_MAX_ENTRIES, derived));
+    }
+
+    return DEFAULT_DEDUPE_MAX_ENTRIES;
+  }
+
+  private getDedupeWarnEntries(maxEntries: number): number {
+    const configured = Number((this.options as any)['dedupe-warn-entries'] ?? process.env.ESRIQ_DEDUPE_WARN_ENTRIES);
+    if (Number.isFinite(configured) && configured > 0) {
+      return Math.min(maxEntries, Math.floor(configured));
+    }
+    return Math.min(maxEntries, Math.max(DEFAULT_DEDUPE_WARN_ENTRIES, Math.floor(maxEntries / 2)));
+  }
+
+  private ensureDedupeCapacity(additionalUniqueHashes: number): void {
+    if (additionalUniqueHashes <= 0) return;
+
+    const maxEntries = this.getDedupeMaxEntries();
+    const warnEntries = this.getDedupeWarnEntries(maxEntries);
+    const nextCount = this.dedupeSeenHashes.size + additionalUniqueHashes;
+
+    if (!this.dedupeWarned && nextCount >= warnEntries) {
+      this.dedupeWarned = true;
+      process.stderr.write(
+        `[warn] --dedupe is tracking ${nextCount} unique feature hashes in memory; guardrail is ${maxEntries}. ` +
+        `Increase --dedupe-max-entries if this is intentional, or rerun without --dedupe for very large jobs.\n`
+      );
+    }
+
+    if (nextCount > maxEntries) {
+      throw new Error(
+        `--dedupe exceeded the in-memory guardrail (${maxEntries} unique feature hashes). ` +
+        `Refusing to continue before exhausting memory. Increase --dedupe-max-entries or rerun without --dedupe.`
+      );
+    }
+  }
+
+  private markDedupeHashSeen(hash: string): boolean {
+    if (this.dedupeSeenHashes.has(hash)) return false;
+    this.dedupeSeenHashes.add(hash);
+    this.runtimeParams.dedupeHashCount = this.dedupeSeenHashes.size;
+    return true;
+  }
+
   private getResumeOutputMode(state?: Partial<ResumeState>): ResumeOutputMode {
     if (state) {
       if (state.outputMode === 'segmented') return 'segmented';
@@ -222,6 +296,17 @@ export default class EsriQuery {
     }
     return this.getConfiguredMaxFileBytes() ? 'segmented' : 'single-file';
   }
+
+  private serializeBbox(): string | undefined {
+    const rawBbox = (this.options as any).bbox;
+    if (!rawBbox) return undefined;
+    const parts = Array.isArray(rawBbox)
+      ? rawBbox.map(Number)
+      : String(rawBbox).split(',').map((x: string) => Number(x.trim()));
+    if (parts.length !== 4 || !parts.every(Number.isFinite)) return undefined;
+    return parts.join(',');
+  }
+
 
   private buildResumeState(oidField: string, base?: Partial<ResumeState>): ResumeState {
     const outputMode = this.getResumeOutputMode(base);
@@ -241,6 +326,8 @@ export default class EsriQuery {
       output: String(this.options.output),
       format: 'geojsonseq',
       oidField,
+      outFields: this.whereObj.outFields ?? undefined,
+      bbox: this.serializeBbox(),
       totalFeatureCount: this.totalFeatureCount,
       lastCompletedOid: base?.lastCompletedOid,
       recordsWritten: base?.recordsWritten ?? 0,
@@ -416,6 +503,8 @@ export default class EsriQuery {
     }
 
     if (!overwrite && loadedState) {
+      const currentBbox = this.serializeBbox();
+      const currentOutFields = this.whereObj.outFields ?? undefined;
       const mismatches = [
         loadedState.mode !== 'geojsonseq-oid' ? 'mode' : null,
         loadedState.url !== this.url ? 'url' : null,
@@ -424,9 +513,27 @@ export default class EsriQuery {
         loadedState.output !== String(this.options.output) ? 'output' : null,
         loadedState.format !== 'geojsonseq' ? 'format' : null,
         loadedState.oidField !== oidField ? 'oidField' : null,
+        // Only check outFields/bbox when the state has them (old state files won't, and that's fine)
+        (loadedState.outFields != null && loadedState.outFields !== currentOutFields) ? 'outFields' : null,
+        (loadedState.bbox != null && loadedState.bbox !== currentBbox) ? 'bbox' : null,
       ].filter(Boolean);
       if (mismatches.length) {
         throw new Error(`Resume state does not match this job (${mismatches.join(', ')}). Use --overwrite to start fresh or point to the correct state file.`);
+      }
+
+      if (loadedState.completed) {
+        throw new Error(
+          `Resume state at ${this.resumeStatePath} shows a completed export ` +
+          `(${loadedState.recordsWritten ?? 0} features written). Use --overwrite to start fresh.`
+        );
+      }
+
+      const outputExists = existsSync(String(this.options.output));
+      if (!outputExists) {
+        throw new Error(
+          `Resume state exists at ${this.resumeStatePath}, but output file is missing: ${this.options.output}. ` +
+          `Use --overwrite to start fresh.`
+        );
       }
 
       let normalizedState: ResumeState = { ...loadedState };
@@ -459,14 +566,12 @@ export default class EsriQuery {
         process.stderr.write('[resume] forcing oid-concurrency=1 for deterministic resume\n');
       }
       (this.options as any)['oid-concurrency'] = 1;
-      (this.options as any)['id-list-threshold'] = Number.MAX_SAFE_INTEGER;
       await this.saveResumeState();
       if (this.options.progress) {
         process.stderr.write(`[resume] resuming after OID ${this.resumeAfterOid ?? 0}\n`);
       }
     } else {
       (this.options as any)['oid-concurrency'] = 1;
-      (this.options as any)['id-list-threshold'] = Number.MAX_SAFE_INTEGER;
       this.resumeAfterOid = undefined;
       this.resumeState = this.buildResumeState(oidField, {
         outputMode: this.getConfiguredMaxFileBytes() ? 'segmented' : 'single-file',
@@ -592,6 +697,9 @@ export default class EsriQuery {
     this._activeTool = null;
     this._stopRequested = false;
     this._stopReason = null;
+    this.dedupeSeenHashes = new Set<string>();
+    this.dedupeWarned = false;
+    this.runtimeParams.dedupeHashCount = 0;
 
     // Ensure necessary source information and fields are available
     if (!this.sourceInfo || !this.fields) {
@@ -706,10 +814,13 @@ export default class EsriQuery {
         // Status handled below; metrics handled in startQuery() scope
       }
 
-      await this.startQuery();
-
-      // Ensure all in-flight writes are flushed before closing
-      await this._lastWrite;
+      try {
+        await this.startQuery();
+      } finally {
+        // Drain in-flight writes whether startQuery succeeded or failed, so the
+        // checkpoint always reflects what is actually on disk before we close.
+        await this._lastWrite.catch(() => {});
+      }
       if (this._writeError) throw this._writeError;
       if (this.resumeState) {
         this.resumeState = this.buildResumeState(this.resumeState.oidField, {
@@ -767,30 +878,40 @@ export default class EsriQuery {
       return crypto.createHash('sha1').update(JSON.stringify(geojson)).digest('hex');
     };
 
-    const isNewFeature = (hash: string): boolean => {
-      if (runtimeParams.hashList[hash]) return false;
-      runtimeParams.hashList[hash] = true;
-      return true;
-    };
-
     // (no-op progress helper removed; using writer.onProgress in start())
 
     const dedupe = Boolean((options as any).dedupe);
+    const prepared = features.map((feature) => {
+      const geometry = convertGeometry(feature.geometry);
+      const geojson: GeoJSON.Feature = {
+        type: 'Feature',
+        properties: feature.attributes,
+        geometry: geometry ?? null,
+      };
+      return {
+        geojson,
+        hash: dedupe ? calculateHash(geojson) : undefined,
+      };
+    });
+
+    if (dedupe) {
+      const projectedNewHashes = new Set<string>();
+      for (const entry of prepared) {
+        const hash = String(entry.hash);
+        if (this.dedupeSeenHashes.has(hash) || projectedNewHashes.has(hash)) continue;
+        projectedNewHashes.add(hash);
+      }
+      this.ensureDedupeCapacity(projectedNewHashes.size);
+    }
+
     // Build an async iterable that yields only new (de-duplicated when enabled) features
     const self = this;
     async function* items(): AsyncIterable<GeoJSON.Feature> {
-      for (const feature of features) {
-        const geometry = convertGeometry(feature.geometry);
-        const geojson: GeoJSON.Feature = {
-          type: 'Feature',
-          properties: feature.attributes,
-          geometry: geometry ?? null,
-        };
+      for (const entry of prepared) {
         if (dedupe) {
-          const dbHash = calculateHash(geojson);
-          if (isNewFeature(dbHash)) yield geojson;
+          if (self.markDedupeHashSeen(String(entry.hash))) yield entry.geojson;
         } else {
-          yield geojson;
+          yield entry.geojson;
         }
       }
     }

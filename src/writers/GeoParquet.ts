@@ -38,6 +38,7 @@ export default class GeoParquet extends Writer {
     private geomTypesSeen: Set<string> = new Set();
     private geometryColumnName = 'geometry';
     private bboxIncludeZ = false;
+    private _overflowColumnsWarned: Set<string> = new Set();
 
     constructor(options: CliOptionsType, sourceInfo?: any) {
         super(options, sourceInfo);
@@ -484,7 +485,17 @@ export default class GeoParquet extends Writer {
             extra[k] = v;
           }
         }
-        if (Object.keys(extra).length) row.properties = JSON.stringify(extra);
+        if (Object.keys(extra).length) {
+          const newKeys = Object.keys(extra).filter(k => !this._overflowColumnsWarned.has(k));
+          if (newKeys.length) {
+            for (const k of newKeys) this._overflowColumnsWarned.add(k);
+            process.stderr.write(
+              `[warn] GeoParquet: ${newKeys.length} column(s) not in schema will be serialized into the "properties" JSON column: ${newKeys.join(', ')}. ` +
+              `Increase --parquetScanRows to include more lookahead rows.\n`
+            );
+          }
+          row.properties = JSON.stringify(extra);
+        }
 
         // Per-feature bbox columns (honor disable flags)
         // Only attach bbox when a geometry value exists in this row

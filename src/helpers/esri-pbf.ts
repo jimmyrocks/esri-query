@@ -12,10 +12,11 @@ import {
 // Proto loader cache (avoid re-reading the .proto on each call)
 // ------------------------------------------------------------
 let protoLoader: Root | undefined;
+const PBF_FORCE_GC_ENV = 'ESRIQ_PBF_FORCE_GC';
 
-// Optional: help V8 compact big arrays when we're done with a batch
+// Opt-in only: forcing GC on decode paths hurts throughput and adds pause jitter.
 export function clearLargeObjects() {
-  if ((global as any).gc) {
+  if (process.env[PBF_FORCE_GC_ENV] === '1' && (global as any).gc) {
     try { (global as any).gc(); } catch { }
   }
 }
@@ -267,9 +268,6 @@ export function messageToJson(message: FeatureCollectionType): ArcGISJsonRestTyp
   for (const f of header.features || []) {
     const decoded = decodeFeatureToArcGIS(f, geometryType, transform);
     if (decoded) outFeatures.push(decoded);
-
-    // Opportunistic GC for very large layers
-    if (outFeatures.length % 1000 === 0) clearLargeObjects();
   }
 
   const sr = header.spatialReference || (message as any).spatialReference || {};
@@ -303,7 +301,7 @@ export default async function esriPbf(arrayBuffer: Uint8Array, protoFile: string
   try {
     const fc = fcType.decode(arrayBuffer) as unknown as FeatureCollectionType;
     const json = messageToJson(fc);
-    // References go out of scope after return; let GC handle cleanup
+    // Optional for low-memory/debug runs when started with --expose-gc.
     clearLargeObjects();
     return json;
   } catch (e) {

@@ -141,4 +141,42 @@ describe('OidChunkQueryTool range scan', () => {
     expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
     expect(String((fetchFeaturesMock.mock.calls[0][0] as any).objectIds || '')).toBe('5,7,9');
   });
+
+  test('prefers range scan early when the estimated objectId list would exceed the heap budget', async () => {
+    const tool = makeTool({ oidField: 'OBJECTID', totalCount: 3000000, idListThreshold: 999999999 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).outStatistics) return { statistics: [{ min: 1, max: 3 }] };
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => []);
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+    (tool as any).getApproxAvailableHeapBytes = () => 32 * 1024 * 1024;
+
+    await tool.runQuery();
+
+    expect(postAsyncMock).toHaveBeenCalledTimes(1);
+    expect((postAsyncMock.mock.calls[0][1] as any).outStatistics).toBeDefined();
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('respects resumeAfterOid during range scan without falling back to objectIds', async () => {
+    const tool = makeTool({ oidField: 'OBJECTID', totalCount: 10, resumeAfterOid: 5 });
+    const postAsyncMock = jest.fn(async (_url: URL, params: Record<string, unknown>) => {
+      if ((params as any).outStatistics) return { statistics: [{ min: 1, max: 10 }] };
+      throw new Error(`Unexpected postAsync call: ${JSON.stringify(params)}`);
+    });
+    const fetchFeaturesMock = jest.fn(async () => []);
+
+    (tool as any).postAsync = postAsyncMock;
+    (tool as any).fetchFeatures = fetchFeaturesMock;
+
+    await tool.runQuery();
+
+    expect(postAsyncMock).toHaveBeenCalledTimes(1);
+    expect(fetchFeaturesMock).toHaveBeenCalledTimes(1);
+    const where = String((fetchFeaturesMock.mock.calls[0][0] as any).where || '');
+    expect(where).toContain('OBJECTID BETWEEN 6 AND 10');
+  });
 });

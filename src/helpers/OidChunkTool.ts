@@ -1,8 +1,14 @@
 import QueryToolBase from '../readers/queryOID.js';
 import type { EsriQueryObjectType } from './esri-rest-types.js';
+import { getHeapStatistics } from 'node:v8';
 
 // Simple feature shape if helpers don't export a stricter one
 type EsriFeatureType = { attributes: Record<string, unknown>; geometry?: unknown };
+
+const DEFAULT_ID_LIST_THRESHOLD = 200000;
+const ESTIMATED_BYTES_PER_OID = 32;
+const MIN_ID_LIST_MEMORY_BUDGET = 64 * 1024 * 1024;
+const MAX_ID_LIST_HEAP_SHARE = 0.25;
 
 /**
  * OID-chunk query strategy implemented as a standalone tool so it can be
@@ -11,6 +17,53 @@ type EsriFeatureType = { attributes: Record<string, unknown>; geometry?: unknown
  * _forceJson flag so we don't try PBF for ID lists or objectId requests.
  */
 export default class OidChunkQueryTool extends QueryToolBase {
+  protected getApproxAvailableHeapBytes(): number | undefined {
+    try {
+      const heapLimit = Number(getHeapStatistics().heap_size_limit || 0);
+      const heapUsed = Number(process.memoryUsage().heapUsed || 0);
+      if (!(heapLimit > 0) || !(heapUsed >= 0)) return undefined;
+      return Math.max(0, heapLimit - heapUsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getIdListThreshold(): number {
+    const configured = Number((this.options as any).idListThreshold ?? process.env.ESRIQ_ID_LIST_THRESHOLD ?? DEFAULT_ID_LIST_THRESHOLD);
+    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ID_LIST_THRESHOLD;
+  }
+
+  private shouldPreferRangeScan(total: number): boolean {
+    if (!(total > 0)) return false;
+    if (total >= this.getIdListThreshold()) return true;
+
+    const oidField = String((this.options as any).oidField ?? '').trim();
+    if (!oidField) return false;
+
+    const available = this.getApproxAvailableHeapBytes();
+    if (!(typeof available === 'number' && available > 0)) return false;
+
+    const estimatedBytes = total * ESTIMATED_BYTES_PER_OID;
+    const budget = Math.max(MIN_ID_LIST_MEMORY_BUDGET, Math.floor(available * MAX_ID_LIST_HEAP_SHARE));
+    if (estimatedBytes >= budget) {
+      this.log(`[oid] preferring range scan: estimated objectId list ${Math.round(estimatedBytes / (1024 * 1024))}MB exceeds budget ${Math.round(budget / (1024 * 1024))}MB`);
+      return true;
+    }
+
+    return false;
+  }
+
+  private upperBound(sorted: number[], value: number): number {
+    let lo = 0;
+    let hi = sorted.length;
+    while (lo < hi) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      if (Number(sorted[mid]) <= value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
   private isAbortError(err: any): boolean {
     if (this.isCancelled()) return true;
     const code = String(err?.code ?? '');
@@ -22,8 +75,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     try {
       // Massive layers: prefer OID range scanning without materializing IDs
       const total = Number((this.options as any).totalCount || 0);
-      const ID_LIST_THRESHOLD = Number((this.options as any).idListThreshold ?? process.env.ESRIQ_ID_LIST_THRESHOLD ?? 500000);
-      if (total > ID_LIST_THRESHOLD) {
+      if (this.shouldPreferRangeScan(total)) {
         try {
           await this._rangeScanByOid();
           this.emit('done');
@@ -49,24 +101,26 @@ export default class OidChunkQueryTool extends QueryToolBase {
         }
         return data as { objectIds: number[] };
       });
-      const rawObjectIds = idsResp.objectIds;
-      let objectIds = rawObjectIds;
+      const objectIds = idsResp.objectIds;
       if ((this.options as any).stableOidOrder || Number.isFinite(Number((this.options as any).resumeAfterOid))) {
-        objectIds = [...objectIds].sort((a, b) => Number(a) - Number(b));
+        objectIds.sort((a: number, b: number) => Number(a) - Number(b));
       }
       const resumeAfterOid = Number((this.options as any).resumeAfterOid);
+      const startIndex = Number.isFinite(resumeAfterOid)
+        ? this.upperBound(objectIds, resumeAfterOid)
+        : 0;
       if (Number.isFinite(resumeAfterOid)) {
-        objectIds = objectIds.filter((id: number) => Number(id) > resumeAfterOid);
+        this.log(`[oid] skipping ${startIndex} objectIds at or below resume checkpoint ${resumeAfterOid}`);
       }
       const exceededTransferLimit = Boolean((idsResp as any)?.exceededTransferLimit);
       if (exceededTransferLimit) {
         throw new Error('objectId list response exceeded transfer limit; aborting to avoid partial export');
       }
-      if (total > 0 && rawObjectIds.length > 0 && rawObjectIds.length < total) {
-        throw new Error(`objectId list response returned ${rawObjectIds.length} IDs, expected ${total}; aborting to avoid partial export`);
+      if (total > 0 && objectIds.length > 0 && objectIds.length < total) {
+        throw new Error(`objectId list response returned ${objectIds.length} IDs, expected ${total}; aborting to avoid partial export`);
       }
-      if (!objectIds.length) { this.emit('done'); return; }
-      await this._runSlicesParallel(objectIds);
+      if (startIndex >= objectIds.length) { this.emit('done'); return; }
+      await this._runSlicesParallel(objectIds, startIndex);
       this.emit('done');
     } catch (err: any) {
       if (this.isAbortError(err)) {
@@ -77,7 +131,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     }
   }
 
-  private async _runSlicesParallel(objectIds: number[]): Promise<void> {
+  private async _runSlicesParallel(objectIds: number[], startIndex = 0): Promise<void> {
     const desired = this.options.maxFeaturesPerRequest || 1000;
     const MAX_CHUNK = Math.max(1, Math.min(desired, 5000));
     const MIN_CHUNK = 1;
@@ -88,7 +142,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const LOCAL_RETRIES = 2;
     const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
 
-    let idx = 0;
+    let idx = Math.max(0, startIndex);
     let current = START_CHUNK;
     let fullStreak = 0;
 
@@ -179,7 +233,8 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const GROW_STREAK = 3; let fullStreak = 0;
     const LOCAL_RETRIES = 2;
     const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
-    let start = minOid;
+    const resumeAfterOid = Number((this.options as any).resumeAfterOid);
+    let start = Number.isFinite(resumeAfterOid) ? Math.max(minOid, Math.floor(resumeAfterOid) + 1) : minOid;
     const nextRange = (): { a: number; b: number } | null => {
       if (start > maxOid) return null; const a = start; const b = Math.min(maxOid, a + window - 1); start = b + 1; return { a, b };
     };

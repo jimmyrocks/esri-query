@@ -1,5 +1,5 @@
-import { describe, expect, test } from '@jest/globals';
-import { deZigZag, longToString, messageToJson } from './esri-pbf.js';
+import { afterEach, beforeEach, describe, expect, jest, test } from '@jest/globals';
+import { clearLargeObjects, deZigZag, longToString, messageToJson } from './esri-pbf.js';
 import esriPbf from './esri-pbf.js';
 import { default as Long } from 'long';
 import { Long as LongType } from 'protobufjs';
@@ -32,6 +32,39 @@ describe('longToString', () => {
   test('passes through primitives', () => {
     expect(longToString(42)).toEqual(42);
     expect(longToString('hello')).toEqual('hello');
+  });
+});
+
+// ----------------------
+// clearLargeObjects
+// ----------------------
+
+describe('clearLargeObjects', () => {
+  const originalGc = (global as any).gc;
+  const originalForceGc = process.env.ESRIQ_PBF_FORCE_GC;
+
+  beforeEach(() => {
+    delete process.env.ESRIQ_PBF_FORCE_GC;
+    (global as any).gc = jest.fn();
+  });
+
+  afterEach(() => {
+    if (originalForceGc === undefined) delete process.env.ESRIQ_PBF_FORCE_GC;
+    else process.env.ESRIQ_PBF_FORCE_GC = originalForceGc;
+
+    if (originalGc === undefined) delete (global as any).gc;
+    else (global as any).gc = originalGc;
+  });
+
+  test('does not run manual GC by default', () => {
+    clearLargeObjects();
+    expect((global as any).gc).not.toHaveBeenCalled();
+  });
+
+  test('runs manual GC only when explicitly enabled', () => {
+    process.env.ESRIQ_PBF_FORCE_GC = '1';
+    clearLargeObjects();
+    expect((global as any).gc).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -306,6 +339,47 @@ describe('messageToJson', () => {
     const emptyMessage: FeatureCollectionType = { queryResult: null } as any;
     const expected: ArcGISJsonRestType = { features: [], fields: [], exceededTransferLimit: false };
     expect(messageToJson(emptyMessage)).toEqual(expected);
+  });
+
+  test('does not trigger manual GC inside large decode loops', () => {
+    const gc = jest.fn();
+    const originalGc = (global as any).gc;
+    const originalForceGc = process.env.ESRIQ_PBF_FORCE_GC;
+    (global as any).gc = gc;
+    process.env.ESRIQ_PBF_FORCE_GC = '1';
+
+    try {
+      const features = Array.from({ length: 2001 }, (_, i) => ({
+        geometry: { lengths: [1], coords: [Long.fromInt(i), Long.fromInt(i)] },
+        attributes: [{ sint_value: i, index: 0 }],
+      }));
+
+      const msg: FeatureCollectionType = {
+        queryResult: {
+          featureResult: {
+            transform: {
+              scale: { xScale: 1, yScale: 1, mScale: 1, zScale: 1 },
+              translate: { xTranslate: 0, yTranslate: 0, mTranslate: 0, zTranslate: 0 },
+              quantizeOriginPostion: 0,
+            },
+            geometryType: GeometryTypeEnum.esriGeometryTypePoint,
+            features: features as any,
+            fields: [{ name: 'id', fieldType: FieldTypeEnum.esriFieldTypeInteger }],
+            exceededTransferLimit: false,
+          },
+        },
+      } as any;
+
+      const out = messageToJson(msg);
+      expect(out.features).toHaveLength(2001);
+      expect(gc).not.toHaveBeenCalled();
+    } finally {
+      if (originalForceGc === undefined) delete process.env.ESRIQ_PBF_FORCE_GC;
+      else process.env.ESRIQ_PBF_FORCE_GC = originalForceGc;
+
+      if (originalGc === undefined) delete (global as any).gc;
+      else (global as any).gc = originalGc;
+    }
   });
 });
 

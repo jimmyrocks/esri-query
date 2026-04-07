@@ -12,6 +12,7 @@ const __dirname = dirname(__filename);
 // Shared constants
 const JSON_CTYPE_RE = /application\/(json|x-?json|pjson)/i;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const MAX_AUTO_GET_FALLBACK_URL_LENGTH = 1800;
 // Note: ArcGIS 498/499 handling has special codes below (for maintainers)
 
 
@@ -75,6 +76,18 @@ function redactUrlForLog(value: string | URL): string {
     return truncateForLog(url.toString(), 500);
   } catch {
     return truncateForLog(String(value).replace(/([?&]token=)[^&]*/i, '$1[redacted]'), 500);
+  }
+}
+
+function shouldTryAutoGetFallback(url: string | URL, params: URLSearchParams): boolean {
+  try {
+    const u = new URL(String(url));
+    const sp = new URLSearchParams(params);
+    if (!sp.has('get')) sp.set('get', '1');
+    u.search = sp.toString();
+    return u.toString().length <= MAX_AUTO_GET_FALLBACK_URL_LENGTH;
+  } catch {
+    return false;
   }
 }
 
@@ -364,6 +377,13 @@ export default async function postAsync(
       errorCode: err.code,
       errorMessage: err.message,
     });
+    if (!signal?.aborted && shouldTryAutoGetFallback(normalizedUrl, body)) {
+      const getAttempt = await tryGetFallback(normalizedUrl, body, headers, signal, fetchLogPath, logBase);
+      if (getAttempt !== undefined) {
+        dlog('POST network error recovered via GET fallback');
+        return getAttempt;
+      }
+    }
     throw err;
   }
 

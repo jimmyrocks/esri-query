@@ -117,6 +117,30 @@ describe('post-async pbf/json fallback behavior', () => {
     );
   });
 
+  test('recovers from a POST network failure via automatic GET fallback when the URL is short enough', async () => {
+    postMock.mockRejectedValueOnce(new Error('socket hang up'));
+    getMock.mockResolvedValueOnce(new Response(
+      JSON.stringify({ features: [{ attributes: { OBJECTID: 7 } }] }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      },
+    ));
+
+    const out: any = await postAsync('https://example.com/FeatureServer/0/query', {
+      f: 'json',
+      where: '1=1',
+      outFields: '*',
+      returnGeometry: true,
+    } as any);
+
+    expect(Array.isArray(out.features)).toBe(true);
+    expect(out.features[0]?.attributes?.OBJECTID).toBe(7);
+    expect(postMock).toHaveBeenCalledTimes(1);
+    expect(getMock).toHaveBeenCalledTimes(1);
+    expect(String(getMock.mock.calls[0][0])).toContain('get=1');
+  });
+
   test('writes fetch-log records with ArcGIS error details from success envelopes', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-fetch-log-'));
     tempDirs.push(tempDir);

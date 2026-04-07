@@ -108,6 +108,26 @@ describe('CLI main', () => {
     expect(payload.jobs[0].header).toBeUndefined();
   });
 
+  it('accepts repeatable -H header flags like curl', async () => {
+    await main([
+      '--dry-run',
+      '--print-format', 'json',
+      '--url', 'https://example.com/arcgis/rest/services/Sample/FeatureServer/0',
+      '--where', '1=1',
+      '-H', 'Cookie: SESSION=abc123',
+      '-H', 'X-Test: present',
+    ]);
+
+    const payload = JSON.parse(logs.join('\n'));
+    expect(process.exitCode).toBe(0);
+    expect(payload.jobs).toHaveLength(1);
+    expect(payload.jobs[0].headers).toEqual({
+      Cookie: 'SESSION=abc123',
+      'X-Test': 'present',
+    });
+    expect(payload.jobs[0].header).toBeUndefined();
+  });
+
   it('accepts --max-file-bytes for geojsonseq dry-runs', async () => {
     await main([
       '--dry-run',

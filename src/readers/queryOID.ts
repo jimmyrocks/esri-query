@@ -54,7 +54,7 @@ export interface QueryOptions {
   oidStart?: number;            // starting slice size (default 250)
   oidConcurrency?: number;      // parallel slice workers (default 2)
   idListThreshold?: number;     // when to switch to range-scan (default 200000; heap guard may switch earlier)
-  oidWindow?: number;           // initial OID range scan window (default 5000)
+  oidWindow?: number;           // initial OID range scan window (default 1000)
   oidField?: string;            // object id field name from layer metadata
 
   // Robustness controls (optional)

@@ -25,6 +25,115 @@ export default class OidChunkQueryTool extends QueryToolBase {
     return code === 'EXCEEDED_TRANSFER_LIMIT' || message.includes('exceeded transfer limit');
   }
 
+  private isRangeTimeoutError(err: any): boolean {
+    const code = String(err?.code ?? '');
+    const name = String(err?.name ?? '');
+    const message = String(err?.message ?? '').toLowerCase();
+    return code === 'ABORT' ||
+      code === 'ETIMEDOUT' ||
+      code === 'ESOCKETTIMEDOUT' ||
+      code === 'RETRY' ||
+      name === 'TimeoutError' ||
+      message.includes('fetch failed') ||
+      message.includes('timed out') ||
+      message.includes('timeout');
+  }
+
+  private isBisectCandidateError(err: any): boolean {
+    if (this.isExceededTransferLimitError(err) || this.isRangeTimeoutError(err)) return true;
+    const status = Number(err?.status ?? err?.statusCode ?? err?.code ?? 0);
+    const message = String(err?.message ?? '').toLowerCase();
+    return status === 500 ||
+      status === 502 ||
+      status === 503 ||
+      status === 504 ||
+      message.includes('error performing query operation') ||
+      message.includes('unable to complete operation');
+  }
+
+  private async fetchObjectIdResponse(params: EsriQueryObjectType): Promise<{ objectIds: number[]; exceededTransferLimit?: boolean }> {
+    const data = await (this as any)._wrappedPolicy.execute(async ({ signal }: { signal: AbortSignal }) => {
+      const response = await this.postAsync(this._baseUrl, params as any, signal);
+      if (!response || !Array.isArray((response as any).objectIds)) {
+        const e: any = new Error('Failed to obtain objectIds');
+        e.code = 'ESRI ERROR';
+        e.body = response;
+        throw e;
+      }
+      return response as { objectIds: number[]; exceededTransferLimit?: boolean };
+    });
+    return data as { objectIds: number[]; exceededTransferLimit?: boolean };
+  }
+
+  private async getObjectIdsForRange(oidField: string, a: number, b: number): Promise<number[]> {
+    const whereBase = this.queryObjectBase.where ?? '1=1';
+    const params: EsriQueryObjectType = {
+      ...(this.queryObjectBase as any),
+      where: `${whereBase} AND ${oidField} BETWEEN ${a} AND ${b}` as any,
+      returnIdsOnly: true as any,
+      returnGeometry: false as any,
+      f: 'json',
+    } as any;
+    delete (params as any).outFields;
+    delete (params as any).outSR;
+    delete (params as any).outStatistics;
+    delete (params as any).objectIds;
+
+    const response = await this.fetchObjectIdResponse(params);
+    if (Boolean(response?.exceededTransferLimit)) {
+      const err: any = new Error('Range objectId probe exceeded transfer limit');
+      err.code = 'EXCEEDED_TRANSFER_LIMIT';
+      throw err;
+    }
+
+    return response.objectIds
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .sort((left, right) => left - right);
+  }
+
+  private async tryDrainRangeByObjectIds(oidField: string, a: number, b: number): Promise<boolean> {
+    try {
+      const ids = await this.getObjectIdsForRange(oidField, a, b);
+      if (ids.length === 0) {
+        this.log(`[oid] range ${oidField} BETWEEN ${a} AND ${b} returned no objectIds during fallback`);
+        return true;
+      }
+
+      const desired = this.options.maxFeaturesPerRequest || 1000;
+      const fallbackChunk = Math.max(1, Math.min(Math.min(desired, 5000), 50, ids.length));
+      this.log(`[oid] range ${oidField} BETWEEN ${a} AND ${b} falling back to objectIds (${ids.length} ids, chunkStart=${fallbackChunk}, concurrency=1)`);
+      await this._runSlicesParallel(ids, 0, { concurrency: 1, startChunk: fallbackChunk });
+      return true;
+    } catch (err: any) {
+      this.log(`[oid] range ${oidField} BETWEEN ${a} AND ${b} objectIds fallback failed: ${String(err?.message || err || 'error')}`);
+      return false;
+    }
+  }
+
+  private async tryFetchSingleOidViaWhere(oid: number): Promise<boolean> {
+    const oidField = String((this.options as any).oidField ?? '').trim();
+    if (!oidField || !Number.isFinite(oid)) return false;
+
+    const whereBase = this.queryObjectBase.where ?? '1=1';
+    const q: EsriQueryObjectType = {
+      ...this.queryObjectBase,
+      where: `${whereBase} AND ${oidField} = ${Math.floor(oid)}` as any,
+      objectIds: undefined as any,
+      outFields: this.queryObjectBase.outFields ?? '*',
+      returnGeometry: this.queryObjectBase.returnGeometry ?? true,
+      returnZ: false as any,
+      returnM: false as any,
+      cacheHint: true as any,
+      f: 'json',
+    } as any;
+
+    const features = await this.fetchFeatures(q);
+    if (features.length) this.emit('data', features as EsriFeatureType[]);
+    this.log(`[oid] salvaged single objectId ${oid} via WHERE fallback`);
+    return true;
+  }
+
   private async getRangeBounds(oidField: string): Promise<{ minOid: number; maxOid: number }> {
     const whereBase = this.queryObjectBase.where ?? '1=1';
     const statsBase: EsriQueryObjectType = {
@@ -179,21 +288,13 @@ export default class OidChunkQueryTool extends QueryToolBase {
       }
 
       // Normal path: fetch object IDs once via JSON, then run slices in parallel
-      const idsResp = await (this as any)._wrappedPolicy.execute(async ({ signal }: { signal: AbortSignal }) => {
-        const params: any = {
-          ...this.queryObjectBase,
-          where: this.queryObjectBase.where ?? '1=1',
-          returnIdsOnly: true,
-          returnGeometry: false,
-          f: 'json',
-        };
-        const data = await this.postAsync(this._baseUrl, params, signal);
-        if (!data || !Array.isArray(data.objectIds)) {
-          const e: any = new Error('Failed to obtain objectIds');
-          e.code = 'ESRI ERROR'; e.body = data; throw e;
-        }
-        return data as { objectIds: number[] };
-      });
+      const idsResp = await this.fetchObjectIdResponse({
+        ...this.queryObjectBase,
+        where: this.queryObjectBase.where ?? '1=1',
+        returnIdsOnly: true as any,
+        returnGeometry: false as any,
+        f: 'json',
+      } as any);
       const objectIds = idsResp.objectIds;
       if ((this.options as any).stableOidOrder || Number.isFinite(Number((this.options as any).resumeAfterOid))) {
         objectIds.sort((a: number, b: number) => Number(a) - Number(b));
@@ -225,23 +326,27 @@ export default class OidChunkQueryTool extends QueryToolBase {
     }
   }
 
-  private async _runSlicesParallel(objectIds: number[], startIndex = 0): Promise<void> {
+  private async _runSlicesParallel(objectIds: number[], startIndex = 0, overrides?: { concurrency?: number; startChunk?: number }): Promise<void> {
     const desired = this.options.maxFeaturesPerRequest || 1000;
     const MAX_CHUNK = Math.max(1, Math.min(desired, 5000));
     const MIN_CHUNK = 1;
-    const START_CHUNK = Math.max(MIN_CHUNK, Math.min(Number((this.options as any).oidStart ?? process.env.ESRIQ_OID_START ?? 250), MAX_CHUNK));
+    const startChunk = overrides?.startChunk ?? Number((this.options as any).oidStart ?? process.env.ESRIQ_OID_START ?? 250);
+    const START_CHUNK = Math.max(MIN_CHUNK, Math.min(startChunk, MAX_CHUNK));
     const GROW_STREAK = 3;
     const GROW_FACTOR = 1.5;
     const SHRINK_FACTOR = 0.5;
     const LOCAL_RETRIES = 2;
-    const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
+    const CONCURRENCY = Math.max(1, Number(overrides?.concurrency ?? (this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
     this.log(`[oid] mode=objectIds total=${objectIds.length} startIndex=${startIndex} chunkStart=${START_CHUNK} concurrency=${CONCURRENCY}`);
 
     let idx = Math.max(0, startIndex);
     let current = START_CHUNK;
     let fullStreak = 0;
+    const pending: Array<{ start: number; size: number }> = [];
 
     const nextSlice = (): { start: number; size: number } | null => {
+      const queued = pending.shift();
+      if (queued) return queued;
       if (idx >= objectIds.length) return null;
       const size = Math.max(MIN_CHUNK, Math.min(current, MAX_CHUNK, objectIds.length - idx));
       const start = idx; idx += size; return { start, size };
@@ -288,6 +393,16 @@ export default class OidChunkQueryTool extends QueryToolBase {
           } catch (err: any) {
             if (this.isAbortError(err)) return;
             lastErr = err;
+            if (this.isBisectCandidateError(err) && s.size > 1) {
+              const leftSize = Math.max(1, Math.floor(s.size / 2));
+              const rightSize = s.size - leftSize;
+              onFailure();
+              if (rightSize > 0) pending.unshift({ start: s.start + leftSize, size: rightSize });
+              pending.unshift({ start: s.start, size: leftSize });
+              this.log(`[oid] split objectIds ${ids[0]}..${ids[ids.length - 1]} -> ${objectIds[s.start]}..${objectIds[s.start + leftSize - 1]}${rightSize > 0 ? `, ${objectIds[s.start + leftSize]}..${objectIds[s.start + s.size - 1]}` : ''}`);
+              ok = true;
+              break;
+            }
             const attempt = tries + 1;
             const meta = [
               err?.code ? `code=${err.code}` : '',
@@ -302,6 +417,17 @@ export default class OidChunkQueryTool extends QueryToolBase {
           }
         }
         if (!ok) {
+          if (s.size === 1) {
+            try {
+              const salvaged = await this.tryFetchSingleOidViaWhere(ids[0]);
+              if (salvaged) {
+                ok = true;
+                continue;
+              }
+            } catch (err: any) {
+              lastErr = err;
+            }
+          }
           const err = lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'OID slice failed after retries'));
           err.message = `${err.message} (objectIds ${ids[0]}..${ids[ids.length - 1]})`;
           this.emitFailure('objectIds', `${ids[0]}..${ids[ids.length - 1]}`, err, tries);
@@ -323,7 +449,7 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const desired = this.options.maxFeaturesPerRequest || 1000;
     const MAX_WINDOW = Math.max(1, Math.min(desired * 5, 20000));
     const MIN_WINDOW = 100;
-    let window = Math.max(MIN_WINDOW, Math.min(Number((this.options as any).oidWindow ?? process.env.ESRIQ_OID_WINDOW ?? 5000), MAX_WINDOW));
+    let window = Math.max(MIN_WINDOW, Math.min(Number((this.options as any).oidWindow ?? process.env.ESRIQ_OID_WINDOW ?? 1000), MAX_WINDOW));
     const GROW_STREAK = 3; let fullStreak = 0;
     const LOCAL_RETRIES = 2;
     const CONCURRENCY = Math.max(1, Number((this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
@@ -371,12 +497,15 @@ export default class OidChunkQueryTool extends QueryToolBase {
           catch (err: any) {
             if (this.isAbortError(err)) return;
             lastErr = err;
-            if (this.isExceededTransferLimitError(err) && r.a < r.b) {
+            if (this.isBisectCandidateError(err) && r.a < r.b) {
               const mid = r.a + Math.floor((r.b - r.a) / 2);
               onFailure();
               pending.unshift({ a: mid + 1, b: r.b });
               pending.unshift({ a: r.a, b: mid });
-              this.log(`[oid] split range ${oidField} BETWEEN ${r.a} AND ${r.b} -> ${r.a}..${mid}, ${mid + 1}..${r.b}`);
+              const why = this.isExceededTransferLimitError(err)
+                ? 'transfer limit'
+                : (this.isRangeTimeoutError(err) ? 'timeout' : 'server error');
+              this.log(`[oid] split range ${oidField} BETWEEN ${r.a} AND ${r.b} after ${why} -> ${r.a}..${mid}, ${mid + 1}..${r.b}`);
               ok = true;
               break;
             }
@@ -396,6 +525,11 @@ export default class OidChunkQueryTool extends QueryToolBase {
           }
         }
         if (!ok) {
+          const salvaged = await this.tryDrainRangeByObjectIds(oidField, r.a, r.b);
+          if (salvaged) {
+            ok = true;
+            continue;
+          }
           const err = lastErr instanceof Error ? lastErr : new Error(String(lastErr || 'OID range failed after retries'));
           err.message = `${err.message} (${oidField} BETWEEN ${r.a} AND ${r.b})`;
           this.emitFailure('range', `${oidField} BETWEEN ${r.a} AND ${r.b}`, err, tries);

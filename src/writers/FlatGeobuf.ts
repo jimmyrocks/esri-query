@@ -63,6 +63,12 @@ export default class FlatGeobufWriter extends Writer {
       maxBatch,
       maxBufferBytes: maxBytes,
     });
+
+    // FlatGeobuf can serialize empty geometries, so default to keeping
+    // degenerate shapes unless the caller explicitly asked to throw/skip.
+    if (options.onInvalid == null && options['on-invalid'] == null) {
+      this.onInvalid = 'keep';
+    }
   }
 
   /** We don't use string writes in this sink. */
@@ -115,6 +121,66 @@ export default class FlatGeobufWriter extends Writer {
   async close(): Promise<void> {
     // Ensure any queued features are flushed by the base helper (calls onFlushBatch).
     await this.onClose();
+  }
+
+  private emptyGeometryForType(type: string | undefined): Geometry {
+    switch (type) {
+      case 'Point':
+        return { type: 'Point', coordinates: [] as any };
+      case 'MultiPoint':
+        return { type: 'MultiPoint', coordinates: [] };
+      case 'LineString':
+        return { type: 'LineString', coordinates: [] as any };
+      case 'MultiLineString':
+        return { type: 'MultiLineString', coordinates: [] };
+      case 'Polygon':
+        return { type: 'Polygon', coordinates: [] as any };
+      case 'MultiPolygon':
+        return { type: 'MultiPolygon', coordinates: [] };
+      case 'GeometryCollection':
+        return { type: 'GeometryCollection', geometries: [] };
+      default:
+        return { type: 'GeometryCollection', geometries: [] };
+    }
+  }
+
+  private normalizeGeometry(feature: Feature): Feature {
+    const geometry = feature.geometry as any;
+    if (!geometry || typeof geometry !== 'object') {
+      return { ...feature, geometry: this.emptyGeometryForType(undefined) };
+    }
+
+    const type = typeof geometry.type === 'string' ? geometry.type : undefined;
+    if (!type) {
+      return { ...feature, geometry: this.emptyGeometryForType(undefined) };
+    }
+    if (type === 'GeometryCollection') {
+      if (!Array.isArray(geometry.geometries)) {
+        return { ...feature, geometry: this.emptyGeometryForType(type) };
+      }
+      return feature;
+    }
+    if (!('coordinates' in geometry) || geometry.coordinates == null) {
+      return { ...feature, geometry: this.emptyGeometryForType(type) };
+    }
+    return feature;
+  }
+
+  override async writeFeature(feature: Feature): Promise<Feature> {
+    const normalized = this.normalizeGeometry(feature);
+    let processed: Feature;
+    try {
+      processed = await super.writeFeature(normalized);
+    } catch (e: any) {
+      if (e && e.code === 'SKIP_FEATURE') {
+        this.status.skipped += 1;
+        return normalized;
+      }
+      throw e;
+    }
+
+    await this.emitFeature(processed);
+    return processed;
   }
 
   /** Compute the SRID to embed in FGB. */

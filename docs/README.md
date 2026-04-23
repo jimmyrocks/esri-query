@@ -31,7 +31,7 @@ npm run build
 ```
 
 Runtime requirements:
-- Node.js 20 or newer.
+- Node.js 22 or newer.
 
 Use the CLI directly:
 
@@ -181,7 +181,7 @@ Required:
 Query behavior:
 - `--json` (bool): Force JSON; disables PBF.
 - `--token` (string): ArcGIS token for secured services.
-- `--header` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
+- `--header`, `-H` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
 - `--max-file-bytes` (number): For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files after this many bytes.
 - `--oid-field` (string): Object ID field override when the service metadata is missing or wrong.
 - `--resume-state` (string): JSON checkpoint file for resumable `geojsonseq` exports.
@@ -200,7 +200,7 @@ OID strategy knobs:
 - `--oid-start` (number): Starting slice size (default 250).
 - `--oid-concurrency` (number): Parallel slice workers (default 2).
 - `--id-list-threshold` (number): Switch to OID range scan when total exceeds this (default 500000).
-- `--oid-window` (number): Initial OID range scan window size (default 5000).
+- `--oid-window` (number): Initial OID range scan window size (default 1000).
 
 GeoParquet:
 - `--parquetScanRows, -S` (number): Schema lookahead rows (default 1000).
@@ -227,7 +227,7 @@ options:
   oid-start: 250
   oid-concurrency: 2
   id-list-threshold: 500000
-  oid-window: 5000
+  oid-window: 1000
 jobs:
   - name: parcels
     url: https://example.com/FeatureServer/0
@@ -268,6 +268,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 
 - `DEBUG_ESRI_QUERY=1`: verbose request/retry logs.
 - `DEBUG_ESRI_QUERY_HEADERS=1`: log headers.
+- `--fetch-log fetch.jsonl`: write one JSON record per HTTP attempt with URL, status, ArcGIS error payload, and fallback path.
 - `DEBUG_ESRI_PBF=1`: one-time PBF field/palette/attribute sample.
 - `ESRIQ_PBF_FORCE_GC=1`: opt-in manual GC after a full PBF decode when running with `node --expose-gc`; intended for debugging or constrained-memory runs, not normal throughput.
 
@@ -281,18 +282,19 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 ## New Options & Behavior
 
 - `--json`: Force JSON responses (disables PBF). Useful for debugging or services that misreport PBF support.
+- `--fetch-log`: Persist per-request JSONL diagnostics including ArcGIS error messages and fallback behavior.
 - `--overwrite` (`-y`): Overwrite existing output files. Applies to GPKG, GeoParquet, FlatGeobuf, and text writers.
 - `--parquetScanRows`: GeoParquet schema lookahead rows (default 1000) to infer column types (numbers/booleans/timestamps).
 - `--dedupe`: Opt-in feature de-duplication by hashing. Beware of memory on very large layers.
 - `--dedupe-warn-entries` / `--dedupe-max-entries`: Tune the in-memory dedupe guardrails when `--dedupe` is enabled.
 - `--token`: ArcGIS token for secured services (added to all requests).
-- `--header`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
+- `--header`, `-H`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
 - `--max-file-bytes`: For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files instead of one large NDJSON file.
 - `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Current scope is `geojsonseq` only; reruns continue from the last checkpointed OID and trim the active output file or part before appending.
 - `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
 - `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.
 - `--id-list-threshold`: If `totalCount` exceeds this, switch to OID range scanning (default 500000). Accepts YAML/JSON config.
-- `--oid-window`: Initial OID range scan window (default 5000). Accepts YAML/JSON config.
+- `--oid-window`: Initial OID range scan window (default 1000). Accepts YAML/JSON config.
 
 Other improvements:
 - PBF decoding handles dictionary-encoded attributes and protobufjs camelCase oneofs (e.g., `uintValue`).

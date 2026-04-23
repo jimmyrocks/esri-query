@@ -208,6 +208,9 @@ export default abstract class QueryToolBase extends EventEmitter {
 
   protected log(...args: any[]) { try { if (this.options?.progress) process.stderr.write(args.join(' ') + '\n'); } catch {} }
   protected delay(ms: number) { return new Promise<void>(r => setTimeout(r, ms)); }
+  protected emitMetrics(extra?: Record<string, unknown>) {
+    this.emit('metrics', { ...this._metrics, ...(extra ?? {}) });
+  }
 
   // -------------------------------
   // Core HTTP call (via shared postAsyncHelper + limiter)
@@ -319,7 +322,7 @@ export default abstract class QueryToolBase extends EventEmitter {
           };
           throw err;
         }
-        this.emit('metrics', { ...this._metrics });
+        this.emitMetrics();
         return data.features as Array<EsriFeatureType>;
       }
 

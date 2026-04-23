@@ -12,18 +12,18 @@
         "types": [
             "node"
         ],
+        "strict": false,
         "noImplicitAny": true,
         "skipLibCheck": true,
         "sourceMap": false,
         "outDir": "dist",
         "rootDir": "src",
-        "baseUrl": ".",
         "paths": {
             "better-sqlite3": [
-                "node_modules/@types/better-sqlite3"
+                "./node_modules/@types/better-sqlite3"
             ],
             "*": [
-                "node_modules/*"
+                "./node_modules/*"
             ]
         }
     },

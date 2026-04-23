@@ -18,6 +18,18 @@ const MAX_ID_LIST_HEAP_SHARE = 0.25;
  */
 export default class OidChunkQueryTool extends QueryToolBase {
   private _rangeScanStarted = false;
+  private _currentOidMode?: 'range' | 'objectIds';
+  private _currentWindowSize?: number;
+  private _currentChunkSize?: number;
+
+  private emitAdaptiveMetrics(extra?: Record<string, unknown>) {
+    this.emitMetrics({
+      oidMode: this._currentOidMode,
+      currentWindowSize: this._currentWindowSize,
+      currentChunkSize: this._currentChunkSize,
+      ...(extra ?? {}),
+    });
+  }
 
   private isExceededTransferLimitError(err: any): boolean {
     const code = String(err?.code ?? '');
@@ -205,6 +217,9 @@ export default class OidChunkQueryTool extends QueryToolBase {
       status: err?.status,
       retryAfterMs: err?.retryAfterMs,
       hint: err?.debug?.hint,
+      oidMode: this._currentOidMode,
+      currentWindowSize: this._currentWindowSize,
+      currentChunkSize: this._currentChunkSize,
       message: String(err?.message || err || 'unknown error'),
     };
     this.emit('failure', payload);
@@ -213,6 +228,8 @@ export default class OidChunkQueryTool extends QueryToolBase {
       payload.status ? `status=${payload.status}` : '',
       payload.retryAfterMs != null ? `retryAfter=${Math.round(Number(payload.retryAfterMs))}ms` : '',
       payload.hint ? `hint=${payload.hint}` : '',
+      payload.currentWindowSize != null ? `window=${payload.currentWindowSize}` : '',
+      payload.currentChunkSize != null ? `chunk=${payload.currentChunkSize}` : '',
     ].filter(Boolean).join(' ');
     this.log(`[oid] ${scope} ${context} failed after ${attempts} attempt(s): ${payload.message}${meta ? ` [${meta}]` : ''}`);
   }
@@ -337,6 +354,10 @@ export default class OidChunkQueryTool extends QueryToolBase {
     const SHRINK_FACTOR = 0.5;
     const LOCAL_RETRIES = 2;
     const CONCURRENCY = Math.max(1, Number(overrides?.concurrency ?? (this.options as any).oidConcurrency ?? process.env.ESRIQ_OID_CONCURRENCY ?? 2));
+    this._currentOidMode = 'objectIds';
+    this._currentChunkSize = START_CHUNK;
+    this._currentWindowSize = undefined;
+    this.emitAdaptiveMetrics();
     this.log(`[oid] mode=objectIds total=${objectIds.length} startIndex=${startIndex} chunkStart=${START_CHUNK} concurrency=${CONCURRENCY}`);
 
     let idx = Math.max(0, startIndex);
@@ -357,13 +378,21 @@ export default class OidChunkQueryTool extends QueryToolBase {
         if (fullStreak >= GROW_STREAK && current < MAX_CHUNK) {
           current = Math.min(MAX_CHUNK, Math.max(current + 1, Math.floor(current * GROW_FACTOR)));
           fullStreak = 0;
+          this._currentChunkSize = current;
+          this.emitAdaptiveMetrics();
           this.log(`[oid] increased chunk to ${current}`);
         }
       } else { fullStreak = 0; }
     };
     const onFailure = () => {
       const shrunk = Math.max(MIN_CHUNK, Math.floor(current * SHRINK_FACTOR));
-      if (shrunk !== current) { current = shrunk; fullStreak = 0; this.log(`[oid] decreased chunk to ${current}`); }
+      if (shrunk !== current) {
+        current = shrunk;
+        fullStreak = 0;
+        this._currentChunkSize = current;
+        this.emitAdaptiveMetrics();
+        this.log(`[oid] decreased chunk to ${current}`);
+      }
     };
 
     const worker = async () => {
@@ -457,6 +486,10 @@ export default class OidChunkQueryTool extends QueryToolBase {
     let start = Number.isFinite(resumeAfterOid) ? Math.max(minOid, Math.floor(resumeAfterOid) + 1) : minOid;
     const pending: Array<{ a: number; b: number }> = [];
     this._rangeScanStarted = true;
+    this._currentOidMode = 'range';
+    this._currentWindowSize = window;
+    this._currentChunkSize = undefined;
+    this.emitAdaptiveMetrics();
     this.log(`[oid] mode=range oidField=${oidField} min=${minOid} max=${maxOid} start=${start} windowStart=${window} concurrency=${CONCURRENCY}`);
     const nextRange = (): { a: number; b: number } | null => {
       const queued = pending.shift();
@@ -467,8 +500,26 @@ export default class OidChunkQueryTool extends QueryToolBase {
       start = b + 1;
       return { a, b };
     };
-    const onSuccess = () => { fullStreak += 1; if (fullStreak >= GROW_STREAK) { window = Math.min(MAX_WINDOW, Math.floor(window * 1.5)); fullStreak = 0; this.log(`[oid] increased window to ${window}`); } };
-    const onFailure = () => { window = Math.max(MIN_WINDOW, Math.floor(window * 0.5)); fullStreak = 0; this.log(`[oid] decreased window to ${window}`); };
+    const onSuccess = () => {
+      fullStreak += 1;
+      if (fullStreak >= GROW_STREAK) {
+        window = Math.min(MAX_WINDOW, Math.floor(window * 1.5));
+        fullStreak = 0;
+        this._currentWindowSize = window;
+        this.emitAdaptiveMetrics();
+        this.log(`[oid] increased window to ${window}`);
+      }
+    };
+    const onFailure = () => {
+      const shrunk = Math.max(MIN_WINDOW, Math.floor(window * 0.5));
+      if (shrunk !== window) {
+        window = shrunk;
+        this._currentWindowSize = window;
+        this.emitAdaptiveMetrics();
+      }
+      fullStreak = 0;
+      this.log(`[oid] decreased window to ${window}`);
+    };
     const worker = async () => {
       while (true) {
         if (this.isCancelled()) return;

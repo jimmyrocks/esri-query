@@ -112,6 +112,9 @@ type ResumeState = {
   outputBytes?: number;
   segmentIndex?: number;
   maxFileBytes?: number;
+  oidMode?: 'range' | 'objectIds';
+  lastWindowSize?: number;
+  lastChunkSize?: number;
   completed?: boolean;
   updatedAt: string;
 };
@@ -176,6 +179,7 @@ export default class EsriQuery {
   private resumeState?: ResumeState;
   private resumeAfterOid?: number;
   private resumeOidField?: string;
+  private adaptiveOidMetrics?: { oidMode?: 'range' | 'objectIds'; lastWindowSize?: number; lastChunkSize?: number };
   private dedupeSeenHashes = new Set<string>();
   private dedupeWarned = false;
 
@@ -341,9 +345,33 @@ export default class EsriQuery {
       outputMode,
       outputBytes,
       ...(outputMode === 'segmented' ? { segmentIndex, maxFileBytes } : {}),
+      oidMode: base?.oidMode,
+      lastWindowSize: Number.isFinite(Number(base?.lastWindowSize)) ? Math.max(1, Number(base?.lastWindowSize)) : undefined,
+      lastChunkSize: Number.isFinite(Number(base?.lastChunkSize)) ? Math.max(1, Number(base?.lastChunkSize)) : undefined,
       completed: base?.completed ?? false,
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  private applyAdaptiveOidMetrics(metrics?: { oidMode?: unknown; currentWindowSize?: unknown; currentChunkSize?: unknown }): void {
+    if (!metrics) return;
+    const oidMode = metrics.oidMode === 'range' || metrics.oidMode === 'objectIds'
+      ? metrics.oidMode
+      : this.adaptiveOidMetrics?.oidMode;
+    const lastWindowSize = Number.isFinite(Number(metrics.currentWindowSize))
+      ? Math.max(1, Number(metrics.currentWindowSize))
+      : this.adaptiveOidMetrics?.lastWindowSize;
+    const lastChunkSize = Number.isFinite(Number(metrics.currentChunkSize))
+      ? Math.max(1, Number(metrics.currentChunkSize))
+      : this.adaptiveOidMetrics?.lastChunkSize;
+    this.adaptiveOidMetrics = { oidMode, lastWindowSize, lastChunkSize };
+    if (!this.resumeState) return;
+    this.resumeState = this.buildResumeState(this.resumeState.oidField, {
+      ...this.resumeState,
+      oidMode,
+      lastWindowSize,
+      lastChunkSize,
+    });
   }
 
   private async findNdjsonCheckpointBytes(outputPath: string, recordsWritten: number): Promise<number> {
@@ -575,6 +603,11 @@ export default class EsriQuery {
       }
 
       this.resumeState = this.buildResumeState(oidField, normalizedState);
+      this.adaptiveOidMetrics = {
+        oidMode: this.resumeState.oidMode,
+        lastWindowSize: this.resumeState.lastWindowSize,
+        lastChunkSize: this.resumeState.lastChunkSize,
+      };
       this.resumeAfterOid = Number.isFinite(Number(normalizedState.lastCompletedOid)) ? Number(normalizedState.lastCompletedOid) : undefined;
       this.applyResumeWriterOptions(this.resumeState);
       if ((this.options as any)['oid-concurrency'] && Number((this.options as any)['oid-concurrency']) !== 1 && this.options.progress) {
@@ -594,6 +627,11 @@ export default class EsriQuery {
         segmentIndex: this.getConfiguredMaxFileBytes() ? 0 : undefined,
         maxFileBytes: this.getConfiguredMaxFileBytes(),
       });
+      this.adaptiveOidMetrics = {
+        oidMode: this.resumeState.oidMode,
+        lastWindowSize: this.resumeState.lastWindowSize,
+        lastChunkSize: this.resumeState.lastChunkSize,
+      };
       await this.saveResumeState();
     }
   }
@@ -621,6 +659,9 @@ export default class EsriQuery {
     this.resumeState = this.buildResumeState(this.resumeState.oidField, {
       ...this.resumeState,
       ...this.getWriterResumeStatePatch(),
+      oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
+      lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
+      lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
       lastCompletedOid,
       recordsWritten: nextRecordsWritten,
       completed: false,
@@ -856,12 +897,29 @@ export default class EsriQuery {
         this.resumeState = this.buildResumeState(this.resumeState.oidField, {
           ...this.resumeState,
           ...this.getWriterResumeStatePatch(),
+          oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
+          lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
+          lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
           completed: true,
           recordsWritten: this.resumeState.recordsWritten,
           lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
         });
         await this.saveResumeState();
       }
+    } catch (err) {
+      if (this.resumeState) {
+        this.resumeState = this.buildResumeState(this.resumeState.oidField, {
+          ...this.resumeState,
+          ...this.getWriterResumeStatePatch(),
+          oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
+          lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
+          lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
+          completed: false,
+          lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
+        });
+        await this.saveResumeState();
+      }
+      throw err;
     } finally {
       await this.writer.close();
     }
@@ -980,10 +1038,10 @@ export default class EsriQuery {
       baseUrl: new URL(this.url),
       progress: this.options.progress,
       totalCount: this.totalFeatureCount,
-      oidStart: (this.options as any)['oid-start'],
+      oidStart: (this.options as any)['oid-start'] ?? this.resumeState?.lastChunkSize,
       oidConcurrency: (this.options as any)['oid-concurrency'],
       idListThreshold: (this.options as any)['id-list-threshold'],
-      oidWindow: (this.options as any)['oid-window'],
+      oidWindow: (this.options as any)['oid-window'] ?? this.resumeState?.lastWindowSize,
       oidField,
       bbox,
       bboxWkid,
@@ -995,19 +1053,21 @@ export default class EsriQuery {
 
     let lastRetriesPrinted = 0;
     const wire = (tool: any) => {
+      try {
+        tool.on('metrics', (m: any) => {
+          this.applyAdaptiveOidMetrics(m);
+          if (!this.options.progress) return;
+          try {
+            const r = Number(m?.totalRetries || 0);
+            if (r > lastRetriesPrinted) {
+              lastRetriesPrinted = r;
+              const b = Number(m?.totalBackoffMs || 0);
+              process.stderr.write(`[net] retries=${r}, backoff≈${Math.round(b)}ms\n`);
+            }
+          } catch {}
+        });
+      } catch {}
       if (this.options.progress) {
-        try {
-          tool.on('metrics', (m: any) => {
-            try {
-              const r = Number(m?.totalRetries || 0);
-              if (r > lastRetriesPrinted) {
-                lastRetriesPrinted = r;
-                const b = Number(m?.totalBackoffMs || 0);
-                process.stderr.write(`[net] retries=${r}, backoff≈${Math.round(b)}ms\n`);
-              }
-            } catch {}
-          });
-        } catch {}
         try {
           tool.on('failure', (evt: any) => {
             const parts = [
@@ -1017,6 +1077,9 @@ export default class EsriQuery {
               evt?.status ? `status=${evt.status}` : '',
               evt?.retryAfterMs != null ? `retryAfter=${Math.round(Number(evt.retryAfterMs))}ms` : '',
               evt?.hint ? `hint=${evt.hint}` : '',
+              evt?.oidMode ? `mode=${evt.oidMode}` : '',
+              evt?.currentWindowSize != null ? `window=${evt.currentWindowSize}` : '',
+              evt?.currentChunkSize != null ? `chunk=${evt.currentChunkSize}` : '',
               evt?.message ? `message=${evt.message}` : '',
               `checkpointOid=${this.resumeAfterOid ?? 'n/a'}`,
             ].filter(Boolean);

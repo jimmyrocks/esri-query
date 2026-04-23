@@ -35,7 +35,7 @@
     "url": "git+https://github.com/jimmyrocks/esri-query.git"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "build": "tsc",
@@ -49,14 +49,14 @@
     "@dsnp/parquetjs": "^1.8.7",
     "@terraformer/arcgis": "^2.1.2",
     "@types/geojson": "^7946.0.16",
-    "better-sqlite3": "12.8.0",
+    "better-sqlite3": "12.9.0",
     "bottleneck": "^2.19.5",
     "cockatiel": "^3.2.1",
     "command-line-args": "^6.0.2",
     "flatgeobuf": "^4.4.0",
-    "ky": "^1.14.3",
+    "ky": "^2.0.2",
     "long": "^5.3.2",
-    "protobufjs": "^7.5.4",
+    "protobufjs": "^8.0.1",
     "wkx": "^0.5.0",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
@@ -68,15 +68,15 @@
     "@types/command-line-args": "^5.2.3",
     "@types/command-line-usage": "^5.0.4",
     "@types/jest": "^30.0.0",
-    "@types/node": "^25.5.2",
+    "@types/node": "^25.6.0",
     "@types/sqlite3": "^5.1.0",
     "@types/terraformer__arcgis": "^2.0.5",
     "jest": "^30.3.0",
     "jest-ts-webcompat-resolver": "^1.0.1",
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
-    "typescript": "5.7.3",
-    "typedoc": "^0.28.18",
+    "typescript": "6.0.3",
+    "typedoc": "^0.28.19",
     "typedoc-plugin-markdown": "^4.11.0"
   }
 }

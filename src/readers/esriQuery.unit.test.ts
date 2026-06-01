@@ -135,6 +135,90 @@ describe('EsriQuery.startQuery', () => {
     });
   });
 
+  test('reuses adaptive window and chunk hints from resume state when explicit values are absent', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID' } as any;
+    (query as any).resumeStatePath = '/tmp/out.resume.json';
+    (query as any).resumeState = {
+      version: 2,
+      mode: 'geojsonseq-oid',
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      queryUrl: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0/query',
+      where: '1=1',
+      output: '/tmp/out.geojsonl',
+      checkpointPath: '/tmp/out.geojsonl',
+      format: 'geojsonseq',
+      oidField: 'OBJECTID',
+      lastWindowSize: 321,
+      lastChunkSize: 23,
+      completed: false,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.startQuery();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].oidWindow).toBe(321);
+    expect(captured[0].oidStart).toBe(23);
+  });
+
+  test('prefers explicit oid window and chunk settings over resume hints', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      'oid-window': 900,
+      'oid-start': 77,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID' } as any;
+    (query as any).resumeStatePath = '/tmp/out.resume.json';
+    (query as any).resumeState = {
+      version: 2,
+      mode: 'geojsonseq-oid',
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      queryUrl: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0/query',
+      where: '1=1',
+      output: '/tmp/out.geojsonl',
+      checkpointPath: '/tmp/out.geojsonl',
+      format: 'geojsonseq',
+      oidField: 'OBJECTID',
+      lastWindowSize: 321,
+      lastChunkSize: 23,
+      completed: false,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const captured: any[] = [];
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+    };
+
+    try {
+      await query.startQuery();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].oidWindow).toBe(900);
+    expect(captured[0].oidStart).toBe(77);
+  });
+
   test('uses oid-field override when source metadata lacks objectIdField', async () => {
     const query = new EsriQuery({
       url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
@@ -518,6 +602,39 @@ describe('EsriQuery.startQuery', () => {
 
     const state = JSON.parse(readFileSync(resumePath, 'utf8'));
     expect(state.completed).toBe(false);
+  });
+
+  test('persists the latest adaptive window metrics to resume state on failure', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      this.emit('metrics', { oidMode: 'range', currentWindowSize: 125 });
+      throw new Error('boom');
+    };
+
+    try {
+      await expect(query.start()).rejects.toThrow('boom');
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.completed).toBe(false);
+    expect(state.oidMode).toBe('range');
+    expect(state.lastWindowSize).toBe(125);
   });
 
   test('fails loudly when a run writes some records but still ends far short of total count', async () => {

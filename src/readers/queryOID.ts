@@ -105,7 +105,18 @@ export default abstract class QueryToolBase extends EventEmitter {
   private _retryPolicy!: ReturnType<typeof retry>;
   private _timeoutPolicy!: ReturnType<typeof timeout>;
   private _wrappedPolicy!: ReturnType<typeof wrap>;
-  private _metrics = { totalRetries: 0, totalBackoffMs: 0 };
+  private _metrics = {
+    totalRetries: 0,
+    totalBackoffMs: 0,
+    totalRequests: 0,
+    inFlightRequests: 0,
+    lastRequestStartedAt: 0,
+    lastSuccessAt: 0,
+    lastFailureAt: 0,
+    lastStatus: undefined as number | undefined,
+    lastCode: undefined as string | number | undefined,
+    lastErrorMessage: undefined as string | undefined,
+  };
   private _abort = new AbortController();
   private _forceJson = false;
 
@@ -170,6 +181,7 @@ export default abstract class QueryToolBase extends EventEmitter {
         status: evt.error?.status ?? 0,
         code: evt.error?.code ?? 'RETRY',
       });
+      this.emitMetrics({ event: 'retry' });
       this.log('failed request:', String(evt.error?.message || evt.error || '').trim());
       this.log(`[retry x${attempt}/${maxAttempts}] waiting ${Math.round(delay)}ms (${evt.error?.code || evt.error?.status || 'error'})`);
     });
@@ -224,15 +236,39 @@ export default abstract class QueryToolBase extends EventEmitter {
     const combined = this._combineSignals(signal, this._abort.signal);
     // Keep per-host rate limiting; delegate HTTP + parsing to shared helper
     return this._limiter.schedule(async () => {
+      const startedAt = Date.now();
+      let event = 'request-success';
+      this._metrics.totalRequests += 1;
+      this._metrics.inFlightRequests += 1;
+      this._metrics.lastRequestStartedAt = startedAt;
+      this.emitMetrics({ event: 'request-start' });
       if (process.env.DEBUG_ESRI_QUERY) {
         // eslint-disable-next-line no-console
         console.error('[query] POST', url, JSON.stringify(q).slice(0, 200) + (JSON.stringify(q).length > 200 ? '…' : ''));
       }
-      return await postAsyncHelper(url, q as any, {
-        signal: combined,
-        headers: this.options.extraHeaders,
-        fetchLogPath: this.options.fetchLog,
-      });
+      try {
+        const result = await postAsyncHelper(url, q as any, {
+          signal: combined,
+          headers: this.options.extraHeaders,
+          fetchLogPath: this.options.fetchLog,
+        });
+        this._metrics.lastSuccessAt = Date.now();
+        this._metrics.lastStatus = undefined;
+        this._metrics.lastCode = undefined;
+        this._metrics.lastErrorMessage = undefined;
+        return result;
+      } catch (err: any) {
+        event = 'request-failure';
+        this._metrics.lastFailureAt = Date.now();
+        const status = Number(err?.status ?? err?.statusCode);
+        this._metrics.lastStatus = Number.isFinite(status) ? status : undefined;
+        this._metrics.lastCode = err?.code ?? err?.name;
+        this._metrics.lastErrorMessage = String(err?.message || err || 'request failed').slice(0, 240);
+        throw err;
+      } finally {
+        this._metrics.inFlightRequests = Math.max(0, this._metrics.inFlightRequests - 1);
+        this.emitMetrics({ event, requestDurationMs: Date.now() - startedAt });
+      }
     });
   }
 

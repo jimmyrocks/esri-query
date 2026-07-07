@@ -1,5 +1,8 @@
 import Gpkg from './Gpkg.js';
 import { describe, expect, test, beforeAll, afterAll } from '@jest/globals';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import type { CliBaseOptionsType, CliSqlOptionsType, CliGeoJsonOptionsType } from '../cli.js';
 import type { EsriFeatureLayerType } from '../helpers/esri-rest-types.js';
 
@@ -103,5 +106,151 @@ describe('Gpkg', () => {
         });
 
         await gpkg.close();
+    });
+
+    test('should not create a resume checkpoint table without resume-state', async () => {
+        const gpkg = new Gpkg(options, sourceInfo);
+        await gpkg.open();
+        const row = gpkg.db.prepare(`SELECT count(*) AS c FROM sqlite_master WHERE type='table' AND name='esri_query_resume'`).get();
+        expect(row).toEqual({ c: 0 });
+        await gpkg.close();
+    });
+});
+
+describe('Gpkg resume', () => {
+    let tempDir: string;
+
+    const resumeSourceInfo = {
+        fields: [
+            { name: 'OBJECTID', type: 'esriFieldTypeOID' },
+            { name: 'name', type: 'esriFieldTypeString' },
+        ],
+        geometryType: 'esriGeometryPoint',
+        objectIdFieldName: 'OBJECTID',
+    } as any as EsriFeatureLayerType;
+
+    const makeOptions = (dbPath: string, extra: Record<string, unknown> = {}) => ({
+        output: dbPath,
+        'layer-name': 'test',
+        'resume-state': join(tempDir, 'test.resume.json'),
+        'resume-oid-field': 'OBJECTID',
+        ...extra,
+    } as any as CliBaseOptionsType & CliSqlOptionsType);
+
+    const makeFeature = (oid: number): GeoJSON.Feature => ({
+        type: 'Feature',
+        properties: { OBJECTID: oid, name: `feature-${oid}` },
+        geometry: { type: 'Point', coordinates: [oid, oid + 1] },
+    });
+
+    beforeAll(() => {
+        tempDir = mkdtempSync(join(tmpdir(), 'esri-query-gpkg-resume-'));
+    });
+
+    afterAll(() => {
+        rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    test('checkpoints the max committed OID in the same transaction as the batch', async () => {
+        const dbPath = join(tempDir, 'checkpoint.gpkg');
+        const gpkg = new Gpkg(makeOptions(dbPath), resumeSourceInfo);
+        await gpkg.open();
+
+        await gpkg.writeFeature(makeFeature(1));
+        await gpkg.writeFeature(makeFeature(2));
+        await gpkg.save(); // flushes the batch + checkpoint in one transaction
+
+        const row = gpkg.db.prepare(`SELECT last_completed_oid, records_written FROM esri_query_resume WHERE id = 1`).get() as any;
+        expect(row.last_completed_oid).toBe(2);
+        expect(row.records_written).toBe(2);
+        expect(gpkg.getResumeCheckpoint()).toEqual({ lastCompletedOid: 2, recordsWritten: 2 });
+
+        await gpkg.close();
+
+        const checkpoint = Gpkg.readResumeCheckpoint(dbPath);
+        expect(checkpoint?.lastCompletedOid).toBe(2);
+        expect(checkpoint?.recordsWritten).toBe(2);
+        expect(checkpoint?.bbox).toEqual([1, 2, 2, 3]);
+    });
+
+    test('reopens in append mode, rehydrates counters, and continues the checkpoint', async () => {
+        const dbPath = join(tempDir, 'append.gpkg');
+
+        const first = new Gpkg(makeOptions(dbPath), resumeSourceInfo);
+        await first.open();
+        await first.writeFeature(makeFeature(10));
+        await first.writeFeature(makeFeature(11));
+        await first.save();
+        await first.close();
+
+        const second = new Gpkg(makeOptions(dbPath, { 'gpkg-resume-append': true }), resumeSourceInfo);
+        await second.open();
+        expect(second.getResumeCheckpoint()).toEqual({ lastCompletedOid: 11, recordsWritten: 2 });
+        expect(second.status.records).toBe(2);
+
+        await second.writeFeature(makeFeature(12));
+        await second.save();
+        await second.close();
+
+        const checkpoint = Gpkg.readResumeCheckpoint(dbPath);
+        expect(checkpoint?.lastCompletedOid).toBe(12);
+        expect(checkpoint?.recordsWritten).toBe(3);
+
+        // No duplicate rows, and metadata reflects the cumulative count
+        const verify = new Gpkg(makeOptions(dbPath, { 'gpkg-resume-append': true }), resumeSourceInfo);
+        const rows = verify.db.prepare(`SELECT count(*) AS c FROM "test"`).get() as any;
+        expect(rows.c).toBe(3);
+        const contents = verify.db.prepare(`SELECT feature_count FROM gpkg_ogr_contents WHERE table_name = 'test'`).get() as any;
+        expect(contents.feature_count).toBe(3);
+        await verify.close();
+    });
+
+    test('append mode loads columns added after the initial schema', async () => {
+        const dbPath = join(tempDir, 'columns.gpkg');
+
+        const first = new Gpkg(makeOptions(dbPath), resumeSourceInfo);
+        await first.open();
+        const lateColumn: GeoJSON.Feature = {
+            type: 'Feature',
+            properties: { OBJECTID: 1, name: 'a', late_col: 'extra' },
+            geometry: { type: 'Point', coordinates: [0, 0] },
+        };
+        await first.writeFeature(lateColumn);
+        await first.save();
+        await first.close();
+
+        const second = new Gpkg(makeOptions(dbPath, { 'gpkg-resume-append': true }), resumeSourceInfo);
+        expect(Object.keys(second.columns)).toContain('late_col');
+        // Writing another feature with the late column must not attempt duplicate DDL
+        await second.open();
+        await second.writeFeature({
+            type: 'Feature',
+            properties: { OBJECTID: 2, name: 'b', late_col: 'more' },
+            geometry: { type: 'Point', coordinates: [1, 1] },
+        });
+        await second.save();
+        await second.close();
+
+        expect(Gpkg.readResumeCheckpoint(dbPath)?.recordsWritten).toBe(2);
+    });
+
+    test('append mode requires the output file to exist', () => {
+        const dbPath = join(tempDir, 'missing.gpkg');
+        expect(() => new Gpkg(makeOptions(dbPath, { 'gpkg-resume-append': true }), resumeSourceInfo))
+            .toThrow(/missing/i);
+    });
+
+    test('readResumeCheckpoint returns undefined for non-resume files', async () => {
+        const dbPath = join(tempDir, 'plain.gpkg');
+        const gpkg = new Gpkg({ output: dbPath, 'layer-name': 'test' } as any, resumeSourceInfo);
+        await gpkg.open();
+        await gpkg.close();
+        expect(Gpkg.readResumeCheckpoint(dbPath)).toBeUndefined();
+        expect(Gpkg.readResumeCheckpoint(join(tempDir, 'does-not-exist.gpkg'))).toBeUndefined();
+    });
+
+    test('rejects s3 outputs when resume is enabled', () => {
+        expect(() => new Gpkg(makeOptions('s3://bucket/key.gpkg'), resumeSourceInfo))
+            .toThrow(/s3/i);
     });
 });

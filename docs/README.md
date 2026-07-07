@@ -78,9 +78,9 @@ Use a session cookie or other custom header:
 esri-query -u <layer-url> -W "1=1" --header "Cookie: SESSION=abc123" -t geojson -o out.geojson
 ```
 
-If your service is secured by cookies, pass the cookie back as a `Cookie` request header. `Set-Cookie` is the response header a server sends to a client, so it is not what you pass to `esri-query`.
+If your service is secured by cookies, pass the cookie back as a `Cookie` request header.
 
-Resume a long-running NDJSON export after refreshing an expiring cookie:
+Resume a long-running NDJSON/geojsonseq export after refreshing an expiring cookie:
 
 ```bash
 esri-query \
@@ -181,12 +181,15 @@ Required:
 Query behavior:
 - `--json` (bool): Force JSON; disables PBF.
 - `--token` (string): ArcGIS token for secured services.
-- `--header`, `-H` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
+- `--header, -H` (string, repeatable): Extra request header in `Name: value` form. Use `Cookie: ...` for cookie-authenticated services.
 - `--max-file-bytes` (number): For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files after this many bytes.
 - `--oid-field` (string): Object ID field override when the service metadata is missing or wrong.
 - `--resume-state` (string): JSON checkpoint file for resumable `geojsonseq` exports.
 - `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
+- `--out-fields, -F` (string): Comma-separated attribute fields to request (defaults to `*`).
 - `--progress, -p` (bool): Show progress, ETA, retries/backoff.
+- `--heartbeat-seconds` (number): With `--progress`, emit a long-run heartbeat every N seconds (default 30; `0` disables).
+- `--stall-seconds` (number): With `--progress`, warn after N seconds without a successful fetch/write (default 180; `0` disables).
 - `--progress-every, -P` (number): Emit progress tick every N accepted features.
 - `--max-records, -R` (number): Soft cap on accepted features.
 - `--on-invalid, -I` (throw | keep | skip): Handling for malformed geometry.
@@ -274,7 +277,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 
 ## Notes & Tips
 
-- Keep `outFields` narrow when possible (use a where with the PBF path, or set in YAML via `options.outFields` soon).
+- Keep `outFields` narrow when possible (set `--out-fields` or YAML `outFields` / `out-fields`). The OID field is auto-included when a narrow list is used.
 - For heavy layers, increase `--oid-concurrency` cautiously; respect server limits.
 - Use `--json` on finicky hosts; you can also force JSON via env for specific hosts if needed.
 - Use `--dry-run` with `--print-format json` to validate configs before long exports.
@@ -291,6 +294,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `--header`, `-H`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
 - `--max-file-bytes`: For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files instead of one large NDJSON file.
 - `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Current scope is `geojsonseq` only; reruns continue from the last checkpointed OID and trim the active output file or part before appending.
+- `--out-fields` (`-F`): Request only selected attributes (`name,type,status`) instead of `*`.
 - `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
 - `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.
 - `--id-list-threshold`: If `totalCount` exceeds this, switch to OID range scanning (default 500000). Accepts YAML/JSON config.
@@ -299,7 +303,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 Other improvements:
 - PBF decoding handles dictionary-encoded attributes and protobufjs camelCase oneofs (e.g., `uintValue`).
 - Uses OID-chunk strategy by default (most reliable). Offset/geographic pagination support has been removed.
-- Enhanced `--progress` shows periodic rate, ETA, and retry/backoff snapshots.
+- Enhanced `--progress` shows periodic rate, ETA, retry/backoff snapshots, and long-run heartbeat/stall diagnostics.
 
 Debugging:
 - `DEBUG_ESRI_QUERY=1` for verbose request/retry info.

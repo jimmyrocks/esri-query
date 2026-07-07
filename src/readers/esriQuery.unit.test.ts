@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EsriQuery from './esriQuery.js';
 import OidChunkQueryTool from '../helpers/OidChunkTool.js';
+import Gpkg from '../writers/Gpkg.js';
+import Database from 'better-sqlite3';
 
 describe('EsriQuery.startQuery', () => {
   test('forwards bbox and bbox-wkid to OID query options', async () => {
@@ -343,6 +345,31 @@ describe('EsriQuery.startQuery', () => {
     expect(state.outputBytes).toBe(0);
   });
 
+  test('refuses to use a resume state file while a live lock exists', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-lock-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    writeFileSync(`${resumePath}.lock`, JSON.stringify({
+      pid: process.pid,
+      output: outputPath,
+      resumeState: resumePath,
+    }, null, 2));
+
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    await expect(query.start()).rejects.toThrow('Resume lock exists');
+    expect(existsSync(`${resumePath}.lock`)).toBe(true);
+  });
+
   test('loads prior resume state and passes resumeAfterOid into OID query options', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
     const outputPath = join(tempDir, 'out.geojsonl');
@@ -604,6 +631,37 @@ describe('EsriQuery.startQuery', () => {
     expect(state.completed).toBe(false);
   });
 
+  test('does not mark resume state completed when interrupted gracefully', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-signal-'));
+    const outputPath = join(tempDir, 'out.geojsonl');
+    const resumePath = join(tempDir, 'out.resume.json');
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: outputPath,
+      'resume-state': resumePath,
+    } as any);
+    query.totalFeatureCount = 10;
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+
+    const originalStartQuery = query.startQuery;
+    query.startQuery = async function () {
+      (this as any).requestGracefulStop('SIGINT');
+    };
+
+    try {
+      await expect(query.start()).rejects.toThrow('Interrupted by signal');
+    } finally {
+      query.startQuery = originalStartQuery;
+    }
+
+    const state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.completed).toBe(false);
+    expect(existsSync(`${resumePath}.lock`)).toBe(false);
+  });
+
   test('persists the latest adaptive window metrics to resume state on failure', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-resume-'));
     const outputPath = join(tempDir, 'out.geojsonl');
@@ -732,5 +790,289 @@ describe('EsriQuery.startQuery', () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+describe('EsriQuery GPKG resume', () => {
+  const gpkgSourceInfo = {
+    objectIdFieldName: 'OBJECTID',
+    geometryType: 'esriGeometryPoint',
+    fields: [
+      { name: 'OBJECTID', type: 'esriFieldTypeOID' },
+      { name: 'name', type: 'esriFieldTypeString' },
+    ],
+  } as any;
+
+  const makeQuery = (outputPath: string, resumePath: string, extra: Record<string, unknown> = {}) => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'gpkg',
+      output: outputPath,
+      'resume-state': resumePath,
+      ...extra,
+    } as any);
+    query.sourceInfo = gpkgSourceInfo;
+    query.fields = {} as any;
+    return query;
+  };
+
+  const esriFeature = (oid: number) => ({
+    attributes: { OBJECTID: oid, name: `feature-${oid}` },
+    geometry: { x: oid, y: oid + 1 },
+  });
+
+  test('runs a full export/crash/resume cycle without duplicating rows', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-gpkg-resume-'));
+    const outputPath = join(tempDir, 'out.gpkg');
+    const resumePath = join(tempDir, 'out.resume.json');
+
+    // Run 1: exports OIDs 1 and 2 to completion.
+    const first = makeQuery(outputPath, resumePath);
+    first.totalFeatureCount = 2;
+
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      this.emit('data', [esriFeature(1), esriFeature(2)] as any);
+    };
+    try {
+      await first.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    let state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.mode).toBe('gpkg-oid');
+    expect(state.format).toBe('gpkg');
+    expect(state.lastCompletedOid).toBe(2);
+    expect(state.recordsWritten).toBe(2);
+    expect(state.completed).toBe(true);
+
+    // Simulate a crash where the sidecar lagged behind the database commit:
+    // the sidecar claims OID 1 but the GPKG checkpoint says OID 2.
+    writeFileSync(resumePath, JSON.stringify({
+      ...state,
+      completed: false,
+      lastCompletedOid: 1,
+      recordsWritten: 1,
+    }, null, 2));
+
+    // Run 2: must trust the in-database checkpoint (OID 2), not the sidecar.
+    const second = makeQuery(outputPath, resumePath);
+    second.totalFeatureCount = 3;
+
+    const captured: any[] = [];
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      captured.push((this as any).options);
+      this.emit('data', [esriFeature(3)] as any);
+    };
+    try {
+      await second.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0].resumeAfterOid).toBe(2);
+    expect(captured[0].oidConcurrency).toBe(1);
+
+    state = JSON.parse(readFileSync(resumePath, 'utf8'));
+    expect(state.completed).toBe(true);
+    expect(state.lastCompletedOid).toBe(3);
+    expect(state.recordsWritten).toBe(3);
+
+    const checkpoint = Gpkg.readResumeCheckpoint(outputPath);
+    expect(checkpoint?.lastCompletedOid).toBe(3);
+    expect(checkpoint?.recordsWritten).toBe(3);
+
+    const db = new Database(outputPath, { readonly: true });
+    try {
+      const rows = db.prepare('SELECT count(*) AS c, count(DISTINCT OBJECTID) AS d FROM "out"').get() as any;
+      expect(rows.c).toBe(3);
+      expect(rows.d).toBe(3);
+    } finally {
+      db.close();
+    }
+  });
+
+  test('rejects --max-file-bytes with gpkg resume', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-gpkg-resume-'));
+    const query = makeQuery(join(tempDir, 'out.gpkg'), join(tempDir, 'out.resume.json'), { 'max-file-bytes': 256 });
+    query.totalFeatureCount = 1;
+    await expect(query.start()).rejects.toThrow(/max-file-bytes/);
+  });
+
+  test('refuses to resume into a gpkg that has no checkpoint table', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-gpkg-resume-'));
+    const outputPath = join(tempDir, 'plain.gpkg');
+    const resumePath = join(tempDir, 'plain.resume.json');
+
+    // A gpkg produced without --resume-state has no checkpoint table.
+    const plain = new Gpkg({ output: outputPath, 'layer-name': 'plain' } as any, gpkgSourceInfo);
+    await plain.open();
+    await plain.close();
+
+    const query = makeQuery(outputPath, resumePath);
+    query.totalFeatureCount = 5;
+    writeFileSync(resumePath, JSON.stringify({
+      version: 2,
+      mode: 'gpkg-oid',
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      queryUrl: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0/query',
+      where: '1=1',
+      output: outputPath,
+      format: 'gpkg',
+      oidField: 'OBJECTID',
+      lastCompletedOid: 1,
+      recordsWritten: 1,
+      completed: false,
+      updatedAt: new Date().toISOString(),
+    }, null, 2));
+
+    await expect(query.start()).rejects.toThrow(/no resume checkpoint table/);
+  });
+});
+
+describe('EsriQuery wait-for-server', () => {
+  const makeWaitQuery = (tempDir: string, extra: Record<string, unknown> = {}) => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: join(tempDir, 'out.geojsonl'),
+      'resume-state': join(tempDir, 'out.resume.json'),
+      'wait-for-server': true,
+      'wait-backoff-seconds': 0.01,
+      ...extra,
+    } as any);
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+    return query;
+  };
+
+  test('requires --resume-state', async () => {
+    const query = new EsriQuery({
+      url: 'https://example.com/arcgis/rest/services/Foo/FeatureServer/0',
+      where: '1=1',
+      format: 'geojsonseq',
+      output: '/tmp/nope.geojsonl',
+      'wait-for-server': true,
+    } as any);
+    query.sourceInfo = { objectIdFieldName: 'OBJECTID', geometryType: 'esriGeometryPoint' } as any;
+    query.fields = {} as any;
+    await expect(query.start()).rejects.toThrow(/requires --resume-state/);
+  });
+
+  test('waits out a fetch failure, records it in the sidecar, and completes on retry', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-wait-'));
+    const query = makeWaitQuery(tempDir);
+    query.totalFeatureCount = 1;
+
+    // The probe fires while the job is idle, which is when the sidecar
+    // should carry the waitingSince/lastError note.
+    const waitingSnapshots: any[] = [];
+    const probe = jest.fn(async () => {
+      waitingSnapshots.push(JSON.parse(readFileSync(join(tempDir, 'out.resume.json'), 'utf8')));
+      return true;
+    });
+    (query as any).probeServer = probe;
+
+    let calls = 0;
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      calls += 1;
+      if (calls === 1) throw new Error('socket hang up (server outage)');
+      this.emit('data', [{ attributes: { OBJECTID: 1 }, geometry: null }] as any);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(calls).toBe(2);
+    expect(probe).toHaveBeenCalled();
+    expect(waitingSnapshots[0].waitingSince).toBeDefined();
+    expect(waitingSnapshots[0].lastError).toMatch(/socket hang up/);
+
+    const state = JSON.parse(readFileSync(join(tempDir, 'out.resume.json'), 'utf8'));
+    expect(state.completed).toBe(true);
+    expect(state.recordsWritten).toBe(1);
+    expect(state.waitingSince).toBeUndefined();
+    expect(state.lastError).toBeUndefined();
+  });
+
+  test('keeps polling while the server stays down, then resumes', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-wait-'));
+    const query = makeWaitQuery(tempDir);
+    query.totalFeatureCount = 1;
+
+    let probes = 0;
+    (query as any).probeServer = jest.fn(async () => {
+      probes += 1;
+      return probes >= 3; // server answers on the third probe
+    });
+
+    let calls = 0;
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      calls += 1;
+      if (calls === 1) throw new Error('ECONNREFUSED');
+      this.emit('data', [{ attributes: { OBJECTID: 1 }, geometry: null }] as any);
+    };
+
+    try {
+      await query.start();
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+
+    expect(probes).toBe(3);
+    expect(calls).toBe(2);
+  });
+
+  test('does not retry setup/validation errors', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-wait-'));
+    // partitioned output is rejected in prepareResumeSupport, before any fetch
+    const query = makeWaitQuery(tempDir, { partition: true });
+    query.totalFeatureCount = 1;
+
+    const probe = jest.fn(async () => true);
+    (query as any).probeServer = probe;
+
+    let calls = 0;
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () { calls += 1; };
+
+    try {
+      await expect(query.start()).rejects.toThrow(/partitioned/);
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+    expect(calls).toBe(0);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  test('gives up after wait-max-attempts consecutive attempts without progress', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'esri-query-wait-'));
+    const query = makeWaitQuery(tempDir, { 'wait-max-attempts': 2 });
+    query.totalFeatureCount = 1;
+
+    (query as any).probeServer = jest.fn(async () => true);
+
+    let calls = 0;
+    const originalRunQuery = OidChunkQueryTool.prototype.runQuery;
+    OidChunkQueryTool.prototype.runQuery = async function () {
+      calls += 1;
+      throw new Error('persistent failure');
+    };
+
+    try {
+      await expect(query.start()).rejects.toThrow(/gave up after 2 consecutive attempts.*persistent failure/);
+    } finally {
+      OidChunkQueryTool.prototype.runQuery = originalRunQuery;
+    }
+    expect(calls).toBe(3); // initial attempt + 2 retries
   });
 });

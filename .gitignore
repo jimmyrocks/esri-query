@@ -1,4 +1,21 @@
 node_modules
 coverage
 dist
-package-lock.json
+
+# Local/generated data and scratch outputs
+data/
+.codex
+aws/
+awscliv2.zip
+reference/
+scratch/
+*.gpkg
+*.gpkg-shm
+*.gpkg-wal
+*.mbtiles
+*.pmtiles
+*.parquet
+*.geojsonseq
+*.geojsonl
+*.jsonl
+*.resume.json

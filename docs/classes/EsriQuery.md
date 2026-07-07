@@ -6,7 +6,7 @@
 
 # Class: EsriQuery
 
-Defined in: [readers/esriQuery.ts:38](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L38)
+Defined in: [readers/esriQuery.ts:151](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L151)
 
 ## Constructors
 
@@ -14,7 +14,7 @@ Defined in: [readers/esriQuery.ts:38](https://github.com/jimmyrocks/esri-query/b
 
 > **new EsriQuery**(`options`): `EsriQuery`
 
-Defined in: [readers/esriQuery.ts:69](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L69)
+Defined in: [readers/esriQuery.ts:197](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L197)
 
 #### Parameters
 
@@ -28,11 +28,19 @@ Defined in: [readers/esriQuery.ts:69](https://github.com/jimmyrocks/esri-query/b
 
 ## Properties
 
+### extraHeaders?
+
+> `optional` **extraHeaders?**: `Record`\<`string`, `string`\>
+
+Defined in: [readers/esriQuery.ts:185](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L185)
+
+***
+
 ### fields?
 
-> `optional` **fields**: `object`
+> `optional` **fields?**: `object`
 
-Defined in: [readers/esriQuery.ts:42](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L42)
+Defined in: [readers/esriQuery.ts:155](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L155)
 
 #### Index Signature
 
@@ -44,7 +52,7 @@ Defined in: [readers/esriQuery.ts:42](https://github.com/jimmyrocks/esri-query/b
 
 > **options**: [`EsriQueryOptions`](../type-aliases/EsriQueryOptions.md)
 
-Defined in: [readers/esriQuery.ts:49](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L49)
+Defined in: [readers/esriQuery.ts:162](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L162)
 
 ***
 
@@ -52,7 +60,7 @@ Defined in: [readers/esriQuery.ts:49](https://github.com/jimmyrocks/esri-query/b
 
 > **queryUrl**: `string`
 
-Defined in: [readers/esriQuery.ts:40](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L40)
+Defined in: [readers/esriQuery.ts:153](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L153)
 
 ***
 
@@ -60,15 +68,15 @@ Defined in: [readers/esriQuery.ts:40](https://github.com/jimmyrocks/esri-query/b
 
 > **runtimeParams**: `object`
 
-Defined in: [readers/esriQuery.ts:53](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L53)
+Defined in: [readers/esriQuery.ts:166](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L166)
+
+#### dedupeHashCount
+
+> **dedupeHashCount**: `number`
 
 #### featureCount
 
 > **featureCount**: `number`
-
-#### hashList
-
-> **hashList**: `Record`\<`string`, `boolean`\>
 
 #### runTime
 
@@ -78,17 +86,17 @@ Defined in: [readers/esriQuery.ts:53](https://github.com/jimmyrocks/esri-query/b
 
 ### sourceInfo?
 
-> `optional` **sourceInfo**: `EsriFeatureLayerType`
+> `optional` **sourceInfo?**: `EsriFeatureLayerType`
 
-Defined in: [readers/esriQuery.ts:50](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L50)
+Defined in: [readers/esriQuery.ts:163](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L163)
 
 ***
 
 ### supportsPagination?
 
-> `optional` **supportsPagination**: `boolean`
+> `optional` **supportsPagination?**: `boolean`
 
-Defined in: [readers/esriQuery.ts:52](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L52)
+Defined in: [readers/esriQuery.ts:165](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L165)
 
 ***
 
@@ -96,7 +104,7 @@ Defined in: [readers/esriQuery.ts:52](https://github.com/jimmyrocks/esri-query/b
 
 > **totalFeatureCount**: `number`
 
-Defined in: [readers/esriQuery.ts:51](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L51)
+Defined in: [readers/esriQuery.ts:164](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L164)
 
 ***
 
@@ -104,7 +112,7 @@ Defined in: [readers/esriQuery.ts:51](https://github.com/jimmyrocks/esri-query/b
 
 > **url**: `string`
 
-Defined in: [readers/esriQuery.ts:39](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L39)
+Defined in: [readers/esriQuery.ts:152](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L152)
 
 ***
 
@@ -112,7 +120,7 @@ Defined in: [readers/esriQuery.ts:39](https://github.com/jimmyrocks/esri-query/b
 
 > **whereObj**: `EsriQueryObjectType`
 
-Defined in: [readers/esriQuery.ts:41](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L41)
+Defined in: [readers/esriQuery.ts:154](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L154)
 
 ***
 
@@ -120,15 +128,27 @@ Defined in: [readers/esriQuery.ts:41](https://github.com/jimmyrocks/esri-query/b
 
 > **writer**: `Writer`
 
-Defined in: [readers/esriQuery.ts:66](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L66)
+Defined in: [readers/esriQuery.ts:179](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L179)
 
 ## Methods
+
+### getProgressSnapshot()
+
+> **getProgressSnapshot**(): `EsriQueryProgressSnapshot`
+
+Defined in: [readers/esriQuery.ts:784](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L784)
+
+#### Returns
+
+`EsriQueryProgressSnapshot`
+
+***
 
 ### getSourceInfo()
 
 > **getSourceInfo**(): `Promise`\<`EsriFeatureLayerType`\>
 
-Defined in: [readers/esriQuery.ts:100](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L100)
+Defined in: [readers/esriQuery.ts:816](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L816)
 
 Gets the source info for an Esri feature or map service
 
@@ -140,17 +160,35 @@ A promise containing the Esri Feature Layer
 
 ***
 
+### requestGracefulStop()
+
+> **requestGracefulStop**(`signal?`): `void`
+
+Defined in: [readers/esriQuery.ts:804](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L804)
+
+#### Parameters
+
+##### signal?
+
+`string`
+
+#### Returns
+
+`void`
+
+***
+
 ### start()
 
-> **start**(): `Promise`\<\{ `featureCount`: `number`; `hashList`: `Record`\<`string`, `boolean`\>; `runTime`: `number`; \}\>
+> **start**(): `Promise`\<\{ `dedupeHashCount`: `number`; `featureCount`: `number`; `runTime`: `number`; \}\>
 
-Defined in: [readers/esriQuery.ts:152](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L152)
+Defined in: [readers/esriQuery.ts:873](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L873)
 
 Initiates the querying process for the given data source and writes the results to a file or stdout.
 
 #### Returns
 
-`Promise`\<\{ `featureCount`: `number`; `hashList`: `Record`\<`string`, `boolean`\>; `runTime`: `number`; \}\>
+`Promise`\<\{ `dedupeHashCount`: `number`; `featureCount`: `number`; `runTime`: `number`; \}\>
 
 Promise that resolves to an object containing runtime parameters after the querying process is complete.
 
@@ -164,7 +202,7 @@ Error if there is an issue reading source information.
 
 > **startQuery**(): `Promise`\<`void`\>
 
-Defined in: [readers/esriQuery.ts:340](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L340)
+Defined in: [readers/esriQuery.ts:1149](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L1149)
 
 #### Returns
 
@@ -174,9 +212,9 @@ Defined in: [readers/esriQuery.ts:340](https://github.com/jimmyrocks/esri-query/
 
 ### write()
 
-> **write**(`features`): `Promise`\<`void`\>
+> **write**(`features`): `Promise`\<`number`\>
 
-Defined in: [readers/esriQuery.ts:268](https://github.com/jimmyrocks/esri-query/blob/c8094ccaf4b3dad4ae201d05ef2e068255440cb0/src/readers/esriQuery.ts#L268)
+Defined in: [readers/esriQuery.ts:1065](https://github.com/jimmyrocks/esri-query/blob/d22c1c6959893f2760a46a92159e1d55a015fc18/src/readers/esriQuery.ts#L1065)
 
 #### Parameters
 
@@ -186,4 +224,4 @@ Defined in: [readers/esriQuery.ts:268](https://github.com/jimmyrocks/esri-query/
 
 #### Returns
 
-`Promise`\<`void`\>
+`Promise`\<`number`\>

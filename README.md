@@ -90,6 +90,41 @@ esri-query \
 
 If the cookie expires mid-run, update the `Cookie` header and rerun the same command. `esri-query` will read `out.resume.json`, trim the active output back to the last saved checkpoint if needed, and continue after the last committed OID.
 
+Resume also works for GeoPackage exports:
+
+```bash
+esri-query \
+  -u <layer-url> \
+  -W "1=1" \
+  -t gpkg \
+  -o out.gpkg \
+  --resume-state out.resume.json
+```
+
+GPKG resume keeps a checkpoint table (`esri_query_resume`) inside the output file itself, updated in the same SQLite transaction as each batch of features. That means the checkpoint can never disagree with the data on disk — even a hard kill (`kill -9`, power loss, OOM) leaves the file resumable with no duplicate or torn rows. On rerun, the in-file checkpoint is the authority; the sidecar JSON is kept for identity validation (URL, where clause, bbox, fields) and operator visibility. `--max-file-bytes` and `s3://` outputs are not supported with GPKG resume.
+
+### Riding out server outages automatically
+
+Add `--wait-for-server` and the job stops needing a human to rerun it. When the server goes out mid-run (or is already down at startup), the job checkpoints, polls the service with capped exponential backoff (30s up to 15min), and re-enters the resume path once the server answers again:
+
+```bash
+esri-query \
+  -u <layer-url> \
+  -W "1=1" \
+  -t gpkg \
+  -o out.gpkg \
+  --resume-state out.resume.json \
+  --wait-for-server
+```
+
+Details worth knowing:
+
+- Requires `--resume-state` — waiting is only an availability convenience; durability always comes from the checkpoint. Killing the process while it waits loses nothing.
+- Only fetch-phase failures are retried. Configuration and validation errors (bad resume state, unsupported options, writer errors like a full disk) fail immediately.
+- While waiting, the sidecar JSON gets `waitingSince` and `lastError` fields so anything watching the state file can see why the job is idle.
+- `--wait-max-seconds N` caps cumulative waiting without forward progress (default: wait forever). `--wait-max-attempts N` gives up after N consecutive resume attempts that fail against a *responsive* server without committing anything new (default 20) — that pattern usually means the problem is not an outage.
+- Any forward progress resets both budgets, so a flaky server that keeps dropping mid-run can still grind through a large export overnight.
+
 If you do not want one giant NDJSON file, add `--max-file-bytes` to roll output into `out.part0000.geojsonl`, `out.part0001.geojsonl`, and so on:
 
 ```bash
@@ -184,6 +219,8 @@ Query behavior:
 - `--bbox, -x` (minX,minY,maxX,maxY) and `--bbox-wkid, -K` (WKID) for optional geometry filter.
 - `--out-fields, -F` (string): Comma-separated attribute fields to request (defaults to `*`).
 - `--progress, -p` (bool): Show progress, ETA, retries/backoff.
+- `--heartbeat-seconds` (number): With `--progress`, emit a long-run heartbeat every N seconds (default 30; `0` disables).
+- `--stall-seconds` (number): With `--progress`, warn after N seconds without a successful fetch/write (default 180; `0` disables).
 - `--progress-every, -P` (number): Emit progress tick every N accepted features.
 - `--max-records, -R` (number): Soft cap on accepted features.
 - `--on-invalid, -I` (throw | keep | skip): Handling for malformed geometry.
@@ -287,7 +324,10 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 - `--token`: ArcGIS token for secured services (added to all requests).
 - `--header`, `-H`: Add repeatable custom request headers such as `Cookie: SESSION=abc123`.
 - `--max-file-bytes`: For `geojsonseq`, roll output into `name.partNNNN.geojsonl` files instead of one large NDJSON file.
-- `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Current scope is `geojsonseq` only; reruns continue from the last checkpointed OID and trim the active output file or part before appending.
+- `--resume-state`: Persist resumable-export progress in a sidecar JSON file. Supported for `geojsonseq` and `gpkg`. Reruns continue from the last checkpointed OID; geojsonseq trims the active output file or part before appending, while gpkg uses an in-file checkpoint table committed transactionally with each batch.
+- `--wait-for-server`: Ride out server outages without human intervention: checkpoint, poll the service with capped backoff, and resume automatically. Requires `--resume-state`.
+- `--wait-max-seconds`: Give up waiting after this many cumulative seconds without forward progress (default: wait forever).
+- `--wait-max-attempts`: Give up after this many consecutive resume attempts that make no progress against a responsive server (default 20).
 - `--out-fields` (`-F`): Request only selected attributes (`name,type,status`) instead of `*`.
 - `--oid-start`: Starting slice size for OID chunking (default 250). Accepts YAML/JSON config.
 - `--oid-concurrency`: Number of parallel OID slice workers (default 2). Accepts YAML/JSON config.
@@ -297,7 +337,7 @@ esri-query -u <layer-url> -W "1=1" -x "-123.5,47.5,-122.8,48.0" -K 4326 -t geojs
 Other improvements:
 - PBF decoding handles dictionary-encoded attributes and protobufjs camelCase oneofs (e.g., `uintValue`).
 - Uses OID-chunk strategy by default (most reliable). Offset/geographic pagination support has been removed.
-- Enhanced `--progress` shows periodic rate, ETA, and retry/backoff snapshots.
+- Enhanced `--progress` shows periodic rate, ETA, retry/backoff snapshots, and long-run heartbeat/stall diagnostics.
 
 Debugging:
 - `DEBUG_ESRI_QUERY=1` for verbose request/retry info.

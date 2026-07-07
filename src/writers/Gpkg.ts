@@ -16,6 +16,14 @@ type GpkgDatabase = InstanceType<typeof Database>;
 type GpkgStatement = ReturnType<GpkgDatabase['prepare']>;
 type RunResult = ReturnType<GpkgStatement['run']>;
 
+export type GpkgResumeCheckpoint = {
+  lastCompletedOid?: number;
+  recordsWritten: number;
+  bbox?: [number, number, number, number];
+};
+
+const RESUME_TABLE = 'esri_query_resume';
+
 // (Removed unused BatchWriter; batched inserts are handled in onFlushBatch)
 
 export default class GpkgInterface extends Writer {
@@ -33,6 +41,14 @@ export default class GpkgInterface extends Writer {
   private s3Target: { bucket: string; key: string } | null = null;
   private dbPath: string; // actual local path for SQLite
   private hasGeometry: boolean = true;
+  // Resume support: when --resume-state is set, a single-row checkpoint table is
+  // updated inside the same transaction as each batch insert, so the checkpoint
+  // can never disagree with the data on disk.
+  private resumeEnabled: boolean = false;
+  private resumeAppend: boolean = false;
+  private resumeOidField?: string;
+  private checkpointRecords: number = 0;
+  private lastCompletedOid?: number;
 
   constructor(options: CliBaseOptionsType & (CliSqlOptionsType | CliGeoJsonOptionsType), sourceInfo: EsriFeatureLayerType & { totalFeatureCount?: number }) {
     super(options, sourceInfo);
@@ -55,35 +71,158 @@ export default class GpkgInterface extends Writer {
     // Ensure our declared target SRID matches the query outSR; we only support 4326 in GPKG
     this.targetSrid = 4326;
 
+    // Resume support flags (set by the reader when --resume-state is active)
+    this.resumeEnabled = Boolean((options as any)['resume-state']);
+    this.resumeAppend = Boolean((options as any)['gpkg-resume-append']);
+    this.resumeOidField = (options as any)['resume-oid-field'] ?? (sourceInfo as any)?.objectIdFieldName;
+
     // Determine whether we target S3
     const s3 = parseS3Url(this.options.output);
     if (s3) {
+      if (this.resumeEnabled) {
+        throw new Error('--resume-state does not support s3:// GPKG outputs; write to a local file and upload separately.');
+      }
       this.s3Target = { bucket: s3.bucket, key: s3.key || `${this.options['layer-name']}.gpkg` };
       const tmp = path.join(os.tmpdir(), `esri-query-${Date.now()}-${Math.random().toString(36).slice(2,8)}.gpkg`);
       this.dbPath = tmp;
     } else {
       this.dbPath = this.options.output;
-      // Overwrite handling for local path
-      try {
-        if (existsSync(this.dbPath)) {
-          if ((options as any).overwrite) {
-            try { unlinkSync(this.dbPath); } catch {}
-          } else {
-            throw new Error(`Output already exists: ${this.dbPath}. Use --overwrite to replace it.`);
-          }
+      if (this.resumeAppend) {
+        if (!existsSync(this.dbPath)) {
+          throw new Error(`Cannot resume: GPKG output is missing: ${this.dbPath}`);
         }
-      } catch {}
+      } else {
+        // Overwrite handling for local path
+        try {
+          if (existsSync(this.dbPath)) {
+            if ((options as any).overwrite) {
+              try { unlinkSync(this.dbPath); } catch {}
+            } else {
+              throw new Error(`Output already exists: ${this.dbPath}. Use --overwrite to replace it.`);
+            }
+          }
+        } catch {}
+      }
     }
 
-    // Create the database
-    this.db = GpkgInterface.createGpkg(this.dbPath);
+    if (this.resumeAppend) {
+      // Reopen the existing database instead of initializing a new GeoPackage
+      this.db = new Database(this.dbPath);
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('foreign_keys = ON');
+    } else {
+      // Create the database
+      this.db = GpkgInterface.createGpkg(this.dbPath);
+    }
     // Tune for bulk ingest
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('cache_size = -16000'); // ~16MB
     this.db.pragma('temp_store = MEMORY');
     this.db.pragma('locking_mode = EXCLUSIVE');
 
-    this.addLayer(this.options['layer-name'], this.columns);
+    if (this.resumeAppend) {
+      this.loadExistingLayerColumns(this.options['layer-name']);
+    } else {
+      this.addLayer(this.options['layer-name'], this.columns);
+    }
+
+    if (this.resumeEnabled) {
+      this.initResumeCheckpoint();
+    }
+  }
+
+  /**
+   * On resume, the table on disk is the authority for which columns exist
+   * (later batches may have added columns the source schema did not declare).
+   */
+  private loadExistingLayerColumns(layerName: string): void {
+    const hasTable = this.db.prepare(`SELECT count(*) AS c FROM sqlite_master WHERE type='table' AND name=?`).get(layerName) as { c: number };
+    if (!hasTable || hasTable.c !== 1) {
+      throw new Error(`Cannot resume: layer table "${layerName}" not found in ${this.dbPath}`);
+    }
+    const info = this.db.prepare(`PRAGMA table_info(${qid(layerName)})`).all() as Array<{ name: string; type: string }>;
+    const columns: GpkgInterface['columns'] = {};
+    for (const col of info) {
+      if (col.name === this.geometryColumnName) continue;
+      const declared = String(col.type || '').toUpperCase();
+      columns[col.name] = (['NULL', 'INTEGER', 'REAL', 'TEXT', 'BLOB'].includes(declared) ? declared : 'TEXT') as GpkgInterface['columns'][string];
+    }
+    this.columns = columns;
+  }
+
+  /**
+   * Creates the checkpoint table if needed and rehydrates cumulative counters
+   * and the running bbox from a previous run.
+   */
+  private initResumeCheckpoint(): void {
+    this.db.prepare(`CREATE TABLE IF NOT EXISTS ${qid(RESUME_TABLE)} (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_completed_oid INTEGER,
+      records_written INTEGER NOT NULL DEFAULT 0,
+      min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE,
+      updated_at TEXT NOT NULL
+    )`).run();
+    this.db.prepare(`INSERT OR IGNORE INTO ${qid(RESUME_TABLE)} (id, records_written, updated_at) VALUES (1, 0, ?)`).run(new Date().toISOString());
+
+    if (this.resumeAppend) {
+      const row = this.db.prepare(`SELECT last_completed_oid, records_written, min_x, min_y, max_x, max_y FROM ${qid(RESUME_TABLE)} WHERE id = 1`).get() as any;
+      if (row) {
+        this.checkpointRecords = Math.max(0, Number(row.records_written ?? 0));
+        this.lastCompletedOid = Number.isFinite(Number(row.last_completed_oid)) ? Number(row.last_completed_oid) : undefined;
+        this.status.records = this.checkpointRecords;
+        const bbox = [row.min_x, row.min_y, row.max_x, row.max_y].map(Number);
+        if (bbox.every(Number.isFinite)) {
+          this.status.bbox = bbox as [number, number, number, number];
+        }
+      }
+    }
+  }
+
+  /** Last durably committed checkpoint (updated transactionally with each batch). */
+  getResumeCheckpoint(): GpkgResumeCheckpoint {
+    return { lastCompletedOid: this.lastCompletedOid, recordsWritten: this.checkpointRecords };
+  }
+
+  /**
+   * Reads the checkpoint from an existing GPKG without holding the file open.
+   * Returns undefined when the file or checkpoint table does not exist.
+   */
+  static readResumeCheckpoint(dbPath: string): GpkgResumeCheckpoint | undefined {
+    if (!existsSync(dbPath)) return undefined;
+    let db: GpkgDatabase | undefined;
+    try {
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      const hasTable = db.prepare(`SELECT count(*) AS c FROM sqlite_master WHERE type='table' AND name=?`).get(RESUME_TABLE) as { c: number };
+      if (!hasTable || hasTable.c !== 1) return undefined;
+      const row = db.prepare(`SELECT last_completed_oid, records_written, min_x, min_y, max_x, max_y FROM ${qid(RESUME_TABLE)} WHERE id = 1`).get() as any;
+      if (!row) return undefined;
+      const bbox = [row.min_x, row.min_y, row.max_x, row.max_y].map(Number);
+      return {
+        lastCompletedOid: Number.isFinite(Number(row.last_completed_oid)) ? Number(row.last_completed_oid) : undefined,
+        recordsWritten: Math.max(0, Number(row.records_written ?? 0)),
+        bbox: bbox.every(Number.isFinite) ? bbox as [number, number, number, number] : undefined,
+      };
+    } finally {
+      try { db?.close(); } catch {}
+    }
+  }
+
+  private findBatchMaxOid(features: GeoJSON.Feature[]): number | undefined {
+    const oidField = this.resumeOidField;
+    if (!oidField) return undefined;
+    let maxOid: number | undefined;
+    for (const feat of features) {
+      const props = (feat.properties ?? {}) as Record<string, unknown>;
+      let raw = props[oidField];
+      if (raw == null) {
+        const key = Object.keys(props).find(k => k.toLowerCase() === oidField.toLowerCase());
+        if (key) raw = props[key];
+      }
+      const oid = Number(raw);
+      if (!Number.isFinite(oid)) continue;
+      maxOid = maxOid == null ? oid : Math.max(maxOid, oid);
+    }
+    return maxOid;
   }
 
   async open(): Promise<void> {
@@ -156,6 +295,18 @@ export default class GpkgInterface extends Writer {
     const rtreeSQL = hasGeometry ? `INSERT OR REPLACE INTO ${qid(rtreeName(layer, geomCol))} (id, minx, maxx, miny, maxy) VALUES ((SELECT last_insert_rowid()), ?, ?, ?, ?)` : null;
     const rtreeStmt = rtreeSQL ? this.db.prepare(rtreeSQL) : null;
 
+    // Compute the checkpoint values this flush will commit. Instance fields are
+    // only advanced after the transaction succeeds, so a failed flush leaves the
+    // in-memory checkpoint aligned with the database.
+    const batchMaxOid = this.resumeEnabled ? this.findBatchMaxOid(features) : undefined;
+    const nextRecords = this.checkpointRecords + features.length;
+    const nextOid = batchMaxOid != null && (this.lastCompletedOid == null || batchMaxOid > this.lastCompletedOid)
+      ? batchMaxOid
+      : this.lastCompletedOid;
+    const checkpointStmt = this.resumeEnabled
+      ? this.db.prepare(`UPDATE ${qid(RESUME_TABLE)} SET last_completed_oid = ?, records_written = ?, min_x = ?, min_y = ?, max_x = ?, max_y = ?, updated_at = ? WHERE id = 1`)
+      : null;
+
     // Execute in a single transaction
     const trx = this.db.transaction((batch: GeoJSON.Feature[]) => {
       for (const feat of batch) {
@@ -177,9 +328,24 @@ export default class GpkgInterface extends Writer {
           rtreeStmt.run(minX, maxX, minY, maxY);
         }
       }
+      if (checkpointStmt) {
+        const [minX, minY, maxX, maxY] = this.status.bbox;
+        checkpointStmt.run(
+          nextOid ?? null,
+          nextRecords,
+          Number.isFinite(minX) ? minX : null,
+          Number.isFinite(minY) ? minY : null,
+          Number.isFinite(maxX) ? maxX : null,
+          Number.isFinite(maxY) ? maxY : null,
+          new Date().toISOString(),
+        );
+      }
     });
 
     trx(features);
+
+    this.checkpointRecords = nextRecords;
+    if (nextOid != null) this.lastCompletedOid = nextOid;
   }
 
   async save(): Promise<void> {

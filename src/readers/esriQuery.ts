@@ -4,7 +4,8 @@ import post from '../helpers/post-async.js';
 import * as ArcGIS from 'arcgis-rest-api';
 import { EsriFeatureLayerType, EsriQueryObjectType } from '../helpers/esri-rest-types.js';
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, truncate, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, truncate, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { getHeapStatistics } from 'node:v8';
 
@@ -17,6 +18,7 @@ import Writer from '../writers/Writer.js';
 // Only OID-chunk strategy is supported now
 import OidChunkQueryTool from '../helpers/OidChunkTool.js';
 import { parseExtraHeaders } from '../cli-options.js';
+import { parseS3Url } from '../helpers/s3.js';
 
 function normalizeOutFields(value: unknown): string | undefined {
   if (value == null) return undefined;
@@ -84,24 +86,32 @@ export type EsriQueryOptions = {
   'fetch-log'?: string;
   fetchLog?: string;
   'resume-state'?: string;
+  'wait-for-server'?: boolean;
+  'wait-max-seconds'?: number;
+  'wait-max-attempts'?: number;
   'oid-field'?: string;
   oidField?: string;
   'max-file-bytes'?: number;
+  'heartbeat-seconds'?: number;
+  heartbeatSeconds?: number;
+  'stall-seconds'?: number;
+  stallSeconds?: number;
   'dedupe-warn-entries'?: number;
   'dedupe-max-entries'?: number;
 };
 
 type ResumeOutputMode = 'single-file' | 'segmented';
+type StopReason = 'max-records' | 'write-error' | 'signal';
 
 type ResumeState = {
   version: 1 | 2;
-  mode: 'geojsonseq-oid';
+  mode: 'geojsonseq-oid' | 'gpkg-oid';
   url: string;
   queryUrl: string;
   where: string;
   output: string;                 // logical base output path from the CLI
   checkpointPath?: string;        // actual on-disk file currently being resumed/written
-  format: 'geojsonseq';
+  format: 'geojsonseq' | 'gpkg';
   oidField: string;
   outFields?: string;
   bbox?: string;
@@ -117,6 +127,9 @@ type ResumeState = {
   lastChunkSize?: number;
   completed?: boolean;
   updatedAt: string;
+  // Set while --wait-for-server is idling between resume attempts; cleared on the next attempt.
+  waitingSince?: string;
+  lastError?: string;
 };
 
 export type EsriQueryProgressSnapshot = {
@@ -126,6 +139,8 @@ export type EsriQueryProgressSnapshot = {
   lastCompletedOid?: number;
   checkpointRecordsWritten?: number;
   completed?: boolean;
+  stopRequested?: boolean;
+  stopReason?: StopReason;
 };
 
 const MAX_ALLOWED_ERRORS = 10; //TODO: This should be a parameter
@@ -173,15 +188,20 @@ export default class EsriQuery {
   private _writeError: Error | null = null;
   private _activeTool: OidChunkQueryTool | null = null;
   private _stopRequested = false;
-  private _stopReason: 'max-records' | 'write-error' | null = null;
+  private _stopReason: StopReason | null = null;
   extraHeaders?: Record<string, string>;
   private resumeStatePath?: string;
   private resumeState?: ResumeState;
+  private _fetchPhaseReached: boolean = false;
+  private _sourceInfoFailed: boolean = false;
+  private resumeLockPath?: string;
+  private resumeLockHandle?: FileHandle;
   private resumeAfterOid?: number;
   private resumeOidField?: string;
   private adaptiveOidMetrics?: { oidMode?: 'range' | 'objectIds'; lastWindowSize?: number; lastChunkSize?: number };
   private dedupeSeenHashes = new Set<string>();
   private dedupeWarned = false;
+  private lastWriteAt = 0;
 
   constructor(options: EsriQueryOptions) {
     this.options = options;
@@ -228,6 +248,105 @@ export default class EsriQuery {
   private getConfiguredMaxFileBytes(): number | undefined {
     const raw = Number((this.options as any)['max-file-bytes']);
     return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+  }
+
+  private getPositiveSeconds(kebabName: string, camelName: string, fallback: number): number {
+    const raw = (this.options as any)[kebabName] ?? (this.options as any)[camelName];
+    const parsed = Number(raw);
+    if (raw == null || raw === '') return fallback;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
+  private formatElapsed(ms: number): string {
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return minutes > 0 ? `${minutes}m${String(remainder).padStart(2, '0')}s` : `${remainder}s`;
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    if (!Number.isFinite(pid) || pid <= 0) return false;
+    if (pid === process.pid) return true;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      return err?.code === 'EPERM';
+    }
+  }
+
+  private async acquireResumeLock(): Promise<void> {
+    if (!this.resumeStatePath || this.resumeLockHandle) return;
+    const lockPath = `${this.resumeStatePath}.lock`;
+    await mkdir(dirname(lockPath), { recursive: true });
+
+    const metadata = {
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      url: this.url,
+      output: this.options.output,
+      resumeState: this.resumeStatePath,
+    };
+
+    const createLock = async () => {
+      const handle = await open(lockPath, 'wx');
+      try {
+        await handle.writeFile(JSON.stringify(metadata, null, 2) + '\n', 'utf8');
+      } catch (err) {
+        try { await handle.close(); } catch {}
+        try { await rm(lockPath, { force: true }); } catch {}
+        throw err;
+      }
+      this.resumeLockPath = lockPath;
+      this.resumeLockHandle = handle;
+    };
+
+    try {
+      await createLock();
+      return;
+    } catch (err: any) {
+      if (err?.code !== 'EEXIST') throw err;
+    }
+
+    let lockDetails = '';
+    let stalePid: number | undefined;
+    try {
+      const raw = await readFile(lockPath, 'utf8');
+      lockDetails = raw.trim();
+      const parsed = JSON.parse(raw) as { pid?: unknown };
+      const pid = Number(parsed?.pid);
+      if (Number.isFinite(pid) && pid > 0 && !this.isProcessAlive(pid)) {
+        stalePid = pid;
+      }
+    } catch {}
+
+    if (stalePid != null) {
+      await rm(lockPath, { force: true });
+      await createLock();
+      if (this.options.progress) {
+        process.stderr.write(`[resume] removed stale lock from pid ${stalePid}: ${lockPath}\n`);
+      }
+      return;
+    }
+
+    throw new Error(
+      `Resume lock exists: ${lockPath}. Another export may be using this resume state. ` +
+      `Stop that process or remove the lock only after confirming no export is running.` +
+      (lockDetails ? ` Lock details: ${lockDetails}` : '')
+    );
+  }
+
+  private async releaseResumeLock(): Promise<void> {
+    const lockPath = this.resumeLockPath;
+    const handle = this.resumeLockHandle;
+    this.resumeLockPath = undefined;
+    this.resumeLockHandle = undefined;
+    if (handle) {
+      try { await handle.close(); } catch {}
+    }
+    if (lockPath) {
+      try { await rm(lockPath, { force: true }); } catch {}
+    }
   }
 
   private getApproxAvailableHeapBytes(): number | undefined {
@@ -315,7 +434,35 @@ export default class EsriQuery {
   }
 
 
+  private getResumeFormat(): 'geojsonseq' | 'gpkg' {
+    return this.options.format === 'gpkg' ? 'gpkg' : 'geojsonseq';
+  }
+
   private buildResumeState(oidField: string, base?: Partial<ResumeState>): ResumeState {
+    const format = this.getResumeFormat();
+    if (format === 'gpkg') {
+      return {
+        version: 2,
+        mode: 'gpkg-oid',
+        url: this.url,
+        queryUrl: this.queryUrl,
+        where: this.options.where,
+        output: String(this.options.output),
+        checkpointPath: String(this.options.output),
+        format: 'gpkg',
+        oidField,
+        outFields: this.whereObj.outFields ?? undefined,
+        bbox: this.serializeBbox(),
+        totalFeatureCount: this.totalFeatureCount,
+        lastCompletedOid: base?.lastCompletedOid,
+        recordsWritten: base?.recordsWritten ?? 0,
+        oidMode: base?.oidMode,
+        lastWindowSize: Number.isFinite(Number(base?.lastWindowSize)) ? Math.max(1, Number(base?.lastWindowSize)) : undefined,
+        lastChunkSize: Number.isFinite(Number(base?.lastChunkSize)) ? Math.max(1, Number(base?.lastChunkSize)) : undefined,
+        completed: base?.completed ?? false,
+        updatedAt: new Date().toISOString(),
+      };
+    }
     const outputMode = this.getResumeOutputMode(base);
     const outputBytes = Number.isFinite(Number(base?.outputBytes)) ? Math.max(0, Number(base?.outputBytes)) : 0;
     const maxFileBytes = outputMode === 'segmented'
@@ -484,6 +631,14 @@ export default class EsriQuery {
   }
 
   private getWriterResumeStatePatch(): Partial<ResumeState> {
+    if (this.writer instanceof Gpkg) {
+      const checkpoint = this.writer.getResumeCheckpoint();
+      return {
+        checkpointPath: String(this.options.output),
+        lastCompletedOid: checkpoint.lastCompletedOid,
+        recordsWritten: checkpoint.recordsWritten,
+      };
+    }
     if (!(this.writer instanceof File)) return {};
     const checkpoint = this.writer.getResumeCheckpoint();
     if (checkpoint.outputMode === 'segmented') {
@@ -512,8 +667,8 @@ export default class EsriQuery {
 
   private async prepareResumeSupport(): Promise<void> {
     if (!this.resumeStatePath) return;
-    if (this.options.format !== 'geojsonseq') {
-      throw new Error('--resume-state currently supports --format geojsonseq only.');
+    if (this.options.format !== 'geojsonseq' && this.options.format !== 'gpkg') {
+      throw new Error('--resume-state currently supports --format geojsonseq or gpkg only.');
     }
     if (!this.options.output) {
       throw new Error('--resume-state requires --output.');
@@ -521,12 +676,27 @@ export default class EsriQuery {
     if ((this.options as any).partition) {
       throw new Error('--resume-state does not support partitioned output.');
     }
+    const resumeFormat = this.getResumeFormat();
+    if (resumeFormat === 'gpkg') {
+      if (this.getConfiguredMaxFileBytes() != null) {
+        throw new Error('--resume-state with --format gpkg does not support --max-file-bytes.');
+      }
+      if (parseS3Url(String(this.options.output))) {
+        throw new Error('--resume-state does not support s3:// GPKG outputs; write to a local file and upload separately.');
+      }
+    }
+
+    await this.acquireResumeLock();
 
     const oidField = this.resolveOidField(this.sourceInfo);
     if (!oidField) {
       throw new Error('Cannot enable resume mode: object ID field is unavailable. Pass --oid-field FIELDNAME.');
     }
     this.resumeOidField = oidField;
+    if (resumeFormat === 'gpkg') {
+      // Lets the Gpkg writer checkpoint the max committed OID inside each batch transaction.
+      (this.options as any)['resume-oid-field'] = oidField;
+    }
 
     const overwrite = Boolean((this.options as any).overwrite);
     let loadedState: ResumeState | undefined;
@@ -542,13 +712,14 @@ export default class EsriQuery {
     if (!overwrite && loadedState) {
       const currentBbox = this.serializeBbox();
       const currentOutFields = this.whereObj.outFields ?? undefined;
+      const expectedMode = resumeFormat === 'gpkg' ? 'gpkg-oid' : 'geojsonseq-oid';
       const mismatches = [
-        loadedState.mode !== 'geojsonseq-oid' ? 'mode' : null,
+        loadedState.mode !== expectedMode ? 'mode' : null,
         loadedState.url !== this.url ? 'url' : null,
         loadedState.queryUrl !== this.queryUrl ? 'queryUrl' : null,
         loadedState.where !== this.options.where ? 'where' : null,
         loadedState.output !== String(this.options.output) ? 'output' : null,
-        loadedState.format !== 'geojsonseq' ? 'format' : null,
+        loadedState.format !== resumeFormat ? 'format' : null,
         loadedState.oidField !== oidField ? 'oidField' : null,
         // Only check outFields/bbox when the state has them (old state files won't, and that's fine)
         (loadedState.outFields != null && loadedState.outFields !== currentOutFields) ? 'outFields' : null,
@@ -565,40 +736,74 @@ export default class EsriQuery {
         );
       }
 
-      const loadedMode = this.getResumeOutputMode(loadedState);
-      const checkpointPath = loadedMode === 'segmented'
-        ? String(loadedState.checkpointPath ?? File.segmentPathFromOutput(String(this.options.output), Math.max(0, Number(loadedState.segmentIndex ?? 0))))
-        : String(this.options.output);
-      const checkpointExpected = Math.max(0, Number(loadedState.recordsWritten ?? 0)) > 0 || Math.max(0, Number(loadedState.outputBytes ?? 0)) > 0;
-      const outputExists = existsSync(checkpointPath);
-      if (!outputExists) {
-        if (checkpointExpected) {
-          throw new Error(
-            `Resume state exists at ${this.resumeStatePath}, but checkpoint output is missing: ${checkpointPath}. ` +
-            `Use --overwrite to start fresh.`
-          );
-        }
-      }
-
       let normalizedState: ResumeState = { ...loadedState };
-      const loadedMaxFileBytes = Number(normalizedState.maxFileBytes);
-      const configuredMaxFileBytes = this.getConfiguredMaxFileBytes();
-      if (loadedMode === 'segmented') {
-        if (!Number.isFinite(loadedMaxFileBytes) || loadedMaxFileBytes <= 0) {
-          throw new Error('Resume state is missing a valid max-file-bytes value for segmented output.');
+      if (resumeFormat === 'gpkg') {
+        const outputPath = String(this.options.output);
+        const sidecarOid = Number.isFinite(Number(loadedState.lastCompletedOid)) ? Number(loadedState.lastCompletedOid) : undefined;
+        const checkpointExpected = Math.max(0, Number(loadedState.recordsWritten ?? 0)) > 0 || sidecarOid != null;
+        if (!existsSync(outputPath)) {
+          if (checkpointExpected) {
+            throw new Error(
+              `Resume state exists at ${this.resumeStatePath}, but GPKG output is missing: ${outputPath}. ` +
+              `Use --overwrite to start fresh.`
+            );
+          }
+          // Nothing was committed last run; recreate the output from scratch.
+          normalizedState.lastCompletedOid = undefined;
+          normalizedState.recordsWritten = 0;
+        } else {
+          // The in-database checkpoint is updated in the same transaction as each
+          // batch insert, so it is the authority; the sidecar can lag behind it
+          // if the process died between a commit and the sidecar write.
+          const dbCheckpoint = Gpkg.readResumeCheckpoint(outputPath);
+          if (!dbCheckpoint) {
+            throw new Error(
+              `Cannot resume: ${outputPath} has no resume checkpoint table ` +
+              `(it was not created by a --resume-state run). Use --overwrite to start fresh.`
+            );
+          }
+          if (sidecarOid != null && dbCheckpoint.lastCompletedOid !== sidecarOid && this.options.progress) {
+            process.stderr.write(`[resume] GPKG checkpoint (OID ${dbCheckpoint.lastCompletedOid ?? 'none'}) supersedes sidecar (OID ${sidecarOid})\n`);
+          }
+          normalizedState.lastCompletedOid = dbCheckpoint.lastCompletedOid;
+          normalizedState.recordsWritten = dbCheckpoint.recordsWritten;
+          (this.options as any)['gpkg-resume-append'] = true;
         }
-        if (configuredMaxFileBytes == null) {
-          (this.options as any)['max-file-bytes'] = loadedMaxFileBytes;
-        } else if (configuredMaxFileBytes !== loadedMaxFileBytes) {
-          throw new Error(`Resume state expects --max-file-bytes ${loadedMaxFileBytes}, got ${configuredMaxFileBytes}.`);
+      } else {
+        const loadedMode = this.getResumeOutputMode(loadedState);
+        const checkpointPath = loadedMode === 'segmented'
+          ? String(loadedState.checkpointPath ?? File.segmentPathFromOutput(String(this.options.output), Math.max(0, Number(loadedState.segmentIndex ?? 0))))
+          : String(this.options.output);
+        const checkpointExpected = Math.max(0, Number(loadedState.recordsWritten ?? 0)) > 0 || Math.max(0, Number(loadedState.outputBytes ?? 0)) > 0;
+        const outputExists = existsSync(checkpointPath);
+        if (!outputExists) {
+          if (checkpointExpected) {
+            throw new Error(
+              `Resume state exists at ${this.resumeStatePath}, but checkpoint output is missing: ${checkpointPath}. ` +
+              `Use --overwrite to start fresh.`
+            );
+          }
         }
-      }
 
-      if (loadedMode === 'single-file') {
-        normalizedState.outputBytes = await this.resolveSingleFileResumeBytes(normalizedState);
-        const desiredMaxFileBytes = this.getConfiguredMaxFileBytes();
-        if (desiredMaxFileBytes != null) {
-          normalizedState = await this.migrateSingleFileResumeToSegments(normalizedState, desiredMaxFileBytes);
+        const loadedMaxFileBytes = Number(normalizedState.maxFileBytes);
+        const configuredMaxFileBytes = this.getConfiguredMaxFileBytes();
+        if (loadedMode === 'segmented') {
+          if (!Number.isFinite(loadedMaxFileBytes) || loadedMaxFileBytes <= 0) {
+            throw new Error('Resume state is missing a valid max-file-bytes value for segmented output.');
+          }
+          if (configuredMaxFileBytes == null) {
+            (this.options as any)['max-file-bytes'] = loadedMaxFileBytes;
+          } else if (configuredMaxFileBytes !== loadedMaxFileBytes) {
+            throw new Error(`Resume state expects --max-file-bytes ${loadedMaxFileBytes}, got ${configuredMaxFileBytes}.`);
+          }
+        }
+
+        if (loadedMode === 'single-file') {
+          normalizedState.outputBytes = await this.resolveSingleFileResumeBytes(normalizedState);
+          const desiredMaxFileBytes = this.getConfiguredMaxFileBytes();
+          if (desiredMaxFileBytes != null) {
+            normalizedState = await this.migrateSingleFileResumeToSegments(normalizedState, desiredMaxFileBytes);
+          }
         }
       }
 
@@ -609,7 +814,9 @@ export default class EsriQuery {
         lastChunkSize: this.resumeState.lastChunkSize,
       };
       this.resumeAfterOid = Number.isFinite(Number(normalizedState.lastCompletedOid)) ? Number(normalizedState.lastCompletedOid) : undefined;
-      this.applyResumeWriterOptions(this.resumeState);
+      if (resumeFormat !== 'gpkg') {
+        this.applyResumeWriterOptions(this.resumeState);
+      }
       if ((this.options as any)['oid-concurrency'] && Number((this.options as any)['oid-concurrency']) !== 1 && this.options.progress) {
         process.stderr.write('[resume] forcing oid-concurrency=1 for deterministic resume\n');
       }
@@ -677,14 +884,24 @@ export default class EsriQuery {
       lastCompletedOid: this.resumeAfterOid ?? this.resumeState?.lastCompletedOid,
       checkpointRecordsWritten: this.resumeState?.recordsWritten,
       completed: this.resumeState?.completed,
+      stopRequested: this._stopRequested,
+      stopReason: this._stopReason ?? undefined,
     };
   }
 
-  private requestStop(reason: 'max-records' | 'write-error') {
+  private requestStop(reason: StopReason) {
     if (this._stopRequested) return;
     this._stopRequested = true;
     this._stopReason = reason;
     try { this._activeTool?.cancel(); } catch {}
+  }
+
+  requestGracefulStop(signal?: NodeJS.Signals | string): void {
+    const alreadyStopping = this._stopRequested;
+    this.requestStop('signal');
+    if (!alreadyStopping && this.options.progress) {
+      process.stderr.write(`\n[signal] ${signal ?? 'interrupt'} received; stopping after current write/checkpoint\n`);
+    }
   }
 
   /**
@@ -745,24 +962,135 @@ export default class EsriQuery {
 
   /**
    * Initiates the querying process for the given data source and writes the results to a file or stdout.
+   * With --wait-for-server, rides out server outages by checkpointing, waiting with
+   * backoff until the service responds again, and re-entering the resume path.
    * @returns Promise that resolves to an object containing runtime parameters after the querying process is complete.
    * @throws Error if there is an issue reading source information.
    */
   async start(): Promise<typeof this.runtimeParams> {
+    if (!this.options['wait-for-server']) return await this.runOnce();
+    if (!this.resumeStatePath) {
+      throw new Error('--wait-for-server requires --resume-state so interrupted runs can resume without duplicating output.');
+    }
+
+    const maxWaitSeconds = Number(this.options['wait-max-seconds']) > 0 ? Number(this.options['wait-max-seconds']) : Infinity;
+    const maxAttempts = Number(this.options['wait-max-attempts']) > 0 ? Number(this.options['wait-max-attempts']) : 20;
+    // Test hook: shrink the schedule without exposing a CLI flag
+    const backoffBase = Number((this.options as any)['wait-backoff-seconds']) > 0 ? Number((this.options as any)['wait-backoff-seconds']) : 30;
+    const backoffSchedule = [1, 2, 4, 10, 20, 30].map(mult => backoffBase * mult);
+
+    let attemptsWithoutProgress = 0;
+    let waitedSecondsWithoutProgress = 0;
+
+    for (;;) {
+      const prevOid = this.resumeAfterOid;
+      const prevRecords = Number(this.resumeState?.recordsWritten ?? 0);
+      let lastError: Error;
+      try {
+        return await this.runOnce();
+      } catch (err: any) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const retryable = (this._sourceInfoFailed || this._fetchPhaseReached)
+          && !this._writeError
+          && this._stopReason !== 'signal';
+        if (!retryable) throw lastError;
+      }
+
+      const currentOid = this.resumeAfterOid ?? this.resumeState?.lastCompletedOid;
+      const currentRecords = Number(this.resumeState?.recordsWritten ?? 0);
+      const madeProgress = (currentOid != null && currentOid !== prevOid) || currentRecords > prevRecords;
+      if (madeProgress) {
+        attemptsWithoutProgress = 0;
+        waitedSecondsWithoutProgress = 0;
+      }
+      attemptsWithoutProgress += 1;
+      if (attemptsWithoutProgress > maxAttempts) {
+        throw new Error(`--wait-for-server gave up after ${maxAttempts} consecutive attempts without progress. Last error: ${lastError.message}`);
+      }
+
+      await this.noteWaitingInResumeState(lastError);
+
+      // Poll the service until it responds again, backing off between probes.
+      let probeIndex = 0;
+      for (;;) {
+        const delaySeconds = backoffSchedule[Math.min(probeIndex, backoffSchedule.length - 1)];
+        waitedSecondsWithoutProgress += delaySeconds;
+        if (waitedSecondsWithoutProgress > maxWaitSeconds) {
+          throw new Error(`--wait-for-server exceeded --wait-max-seconds ${maxWaitSeconds} without progress. Last error: ${lastError.message}`);
+        }
+        if (this.options.progress) {
+          process.stderr.write(`[wait] attempt ${attemptsWithoutProgress}/${maxAttempts} failed (${lastError.message.split('\n')[0]}); probing server in ${delaySeconds}s (checkpoint OID ${this.resumeAfterOid ?? this.resumeState?.lastCompletedOid ?? 'none'})\n`);
+        }
+        await this.interruptibleSleep(delaySeconds);
+        if (await this.probeServer()) break;
+        probeIndex += 1;
+      }
+      if (this.options.progress) {
+        process.stderr.write(`[wait] server responded; resuming export\n`);
+      }
+      // A previous run's --overwrite must not wipe checkpointed progress on retry.
+      delete (this.options as any).overwrite;
+    }
+  }
+
+  /** Writes waiting metadata into the sidecar so operators can see why the job is idle. */
+  private async noteWaitingInResumeState(error: Error): Promise<void> {
+    if (!this.resumeState || !this.resumeStatePath) return;
+    try {
+      this.resumeState = {
+        ...this.resumeState,
+        waitingSince: this.resumeState.waitingSince ?? new Date().toISOString(),
+        lastError: error.message.split('\n')[0].slice(0, 500),
+      };
+      await this.saveResumeState();
+    } catch {}
+  }
+
+  /** Sleeps in short ticks so a SIGINT/SIGTERM during the wait exits promptly. */
+  private async interruptibleSleep(seconds: number): Promise<void> {
+    const deadline = Date.now() + seconds * 1000;
+    while (Date.now() < deadline) {
+      if (this._stopRequested) {
+        throw new Error('Interrupted by signal while waiting for server; resume checkpoint saved.');
+      }
+      const remainingMs = Math.min(1000, deadline - Date.now());
+      await new Promise(resolve => setTimeout(resolve, remainingMs));
+    }
+    if (this._stopRequested) {
+      throw new Error('Interrupted by signal while waiting for server; resume checkpoint saved.');
+    }
+  }
+
+  /** Returns true when the service answers a metadata request again. */
+  private async probeServer(): Promise<boolean> {
+    try {
+      const fetchLogPath = (this.options as any)['fetch-log'] ?? (this.options as any).fetchLog;
+      await post(this.options.url, { f: 'json' }, { headers: this.extraHeaders, fetchLogPath });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async runOnce(): Promise<typeof this.runtimeParams> {
     this._lastWrite = Promise.resolve();
     this._writeError = null;
     this._activeTool = null;
     this._stopRequested = false;
     this._stopReason = null;
+    this._fetchPhaseReached = false;
+    this._sourceInfoFailed = false;
     this.dedupeSeenHashes = new Set<string>();
     this.dedupeWarned = false;
     this.runtimeParams.dedupeHashCount = 0;
+    this.lastWriteAt = Date.now();
 
     // Ensure necessary source information and fields are available
     if (!this.sourceInfo || !this.fields) {
       try {
         await this.getSourceInfo();
       } catch (e) {
+        this._sourceInfoFailed = true;
         throw new Error(`Cannot read source info: ${this.url}\n${e.toString()}`);
       }
     }
@@ -816,112 +1144,121 @@ export default class EsriQuery {
       }
     }
 
-    // Create the writer instance and start the queries
-    await this.prepareResumeSupport();
-    const outWkid = Number(this.whereObj.outSR);
-    this.writer = new writerType(this.options as any, {
-      ...this.sourceInfo,
-      totalFeatureCount: this.totalFeatureCount,
-      outputWkid: Number.isFinite(outWkid) ? outWkid : undefined,
-    });
-
     // Update runtime parameters and track the process time
     const startTime = new Date();
 
     try {
-      await this.writer.open();
-      if (this.options.progress) {
-        const total = this.totalFeatureCount || 0;
-        const resumedRecords = Number(this.resumeState?.recordsWritten ?? 0);
-        if (resumedRecords > 0) {
-          this.writer.status.records = resumedRecords;
-          process.stderr.write(`[resume] checkpoint ${resumedRecords}${total ? `/${total}` : ''}\n`);
-        }
-        this.writer.progressEvery = Math.max(1, Math.floor(Math.max(1, total) / 100));
-        const t0 = Date.now();
-        let lastStatus = t0;
-        const showCompactProgress = resumedRecords === 0;
-        this.writer.onProgress = ({ records, invalid, skipped }) => {
-          // Compact [0....10] style progress
-          if (showCompactProgress) {
-            if (records === 1) process.stderr.write('[0');
-            if (this.dotSplits.includes(records)) process.stderr.write('.');
-            const tenIndex = this.numSplits.indexOf(records);
-            if (tenIndex > -1) process.stderr.write(String(tenIndex + 1));
-            if (total && records === total) process.stderr.write('10]\n');
-          }
-
-          // Periodic status line with rates and ETA (every ~5s)
-          const now = Date.now();
-          if (now - lastStatus >= 5000) {
-            const elapsed = (now - t0) / 1000;
-            const runRecords = Math.max(0, records - resumedRecords);
-            const rate = elapsed > 0 ? (runRecords / elapsed) : 0;
-            const remaining = total > 0 ? Math.max(0, total - records) : 0;
-            const etaSec = rate > 0 && remaining > 0 ? Math.round(remaining / rate) : 0;
-            const fmt = (s: number) => {
-              const m = Math.floor(s / 60); const ss = s % 60; return m > 0 ? `${m}m${String(ss).padStart(2, '0')}s` : `${ss}s`;
-            };
-            const pct = total > 0 ? Math.floor((records / total) * 100) : 0;
-            process.stderr.write(`\n[progress] ${records}${total ? `/${total}` : ''} ${total ? `(${pct}%)` : ''}, +${runRecords} this run @ ${rate.toFixed(1)}/s, eta ${etaSec ? fmt(etaSec) : '—'}, invalid=${invalid}, skipped=${skipped}\n`);
-            lastStatus = now;
-          }
-        };
-
-        // Status handled below; metrics handled in startQuery() scope
-      }
+      await this.prepareResumeSupport();
+      const outWkid = Number(this.whereObj.outSR);
+      this.writer = new writerType(this.options as any, {
+        ...this.sourceInfo,
+        totalFeatureCount: this.totalFeatureCount,
+        outputWkid: Number.isFinite(outWkid) ? outWkid : undefined,
+      });
 
       try {
-        await this.startQuery();
+        await this.writer.open();
+        if (this.options.progress) {
+          const total = this.totalFeatureCount || 0;
+          const resumedRecords = Number(this.resumeState?.recordsWritten ?? 0);
+          if (resumedRecords > 0) {
+            this.writer.status.records = resumedRecords;
+            process.stderr.write(`[resume] checkpoint ${resumedRecords}${total ? `/${total}` : ''}\n`);
+          }
+          this.writer.progressEvery = Math.max(1, Math.floor(Math.max(1, total) / 100));
+          const t0 = Date.now();
+          let lastStatus = t0;
+          const showCompactProgress = resumedRecords === 0;
+          this.writer.onProgress = ({ records, invalid, skipped }) => {
+            // Compact [0....10] style progress
+            if (showCompactProgress) {
+              if (records === 1) process.stderr.write('[0');
+              if (this.dotSplits.includes(records)) process.stderr.write('.');
+              const tenIndex = this.numSplits.indexOf(records);
+              if (tenIndex > -1) process.stderr.write(String(tenIndex + 1));
+              if (total && records === total) process.stderr.write('10]\n');
+            }
+
+            // Periodic status line with rates and ETA (every ~5s)
+            const now = Date.now();
+            if (now - lastStatus >= 5000) {
+              const elapsed = (now - t0) / 1000;
+              const runRecords = Math.max(0, records - resumedRecords);
+              const rate = elapsed > 0 ? (runRecords / elapsed) : 0;
+              const remaining = total > 0 ? Math.max(0, total - records) : 0;
+              const etaSec = rate > 0 && remaining > 0 ? Math.round(remaining / rate) : 0;
+              const fmt = (s: number) => {
+                const m = Math.floor(s / 60); const ss = s % 60; return m > 0 ? `${m}m${String(ss).padStart(2, '0')}s` : `${ss}s`;
+              };
+              const pct = total > 0 ? Math.floor((records / total) * 100) : 0;
+              process.stderr.write(`\n[progress] ${records}${total ? `/${total}` : ''} ${total ? `(${pct}%)` : ''}, +${runRecords} this run @ ${rate.toFixed(1)}/s, eta ${etaSec ? fmt(etaSec) : '—'}, invalid=${invalid}, skipped=${skipped}\n`);
+              lastStatus = now;
+            }
+          };
+
+          // Status handled below; metrics handled in startQuery() scope
+        }
+
+        try {
+          // From here on, failures are fetch-phase failures (server outages,
+          // exhausted retries) that --wait-for-server may safely retry from checkpoint.
+          this._fetchPhaseReached = true;
+          await this.startQuery();
+        } finally {
+          // Drain in-flight writes whether startQuery succeeded or failed, so the
+          // checkpoint always reflects what is actually on disk before we close.
+          await this._lastWrite.catch(() => {});
+        }
+        if (this._writeError) throw this._writeError;
+        if (this._stopRequested && this._stopReason === 'signal') {
+          throw new Error('Interrupted by signal; resume checkpoint saved if --resume-state is set.');
+        }
+        const summary = this.writer.getSummary();
+        const dedupeEnabled = Boolean((this.options as any).dedupe);
+        const onInvalid = (this.options as any)['on-invalid'] ?? (this.options as any).onInvalid;
+        const shortfall = Math.max(0, Number(this.totalFeatureCount || 0) - Number(summary.records || 0));
+        if (!this._stopRequested && this.totalFeatureCount > 0 && shortfall > 0 && this.runtimeParams.featureCount > 0 && !dedupeEnabled && onInvalid !== 'skip') {
+          const detail = [
+            `records=${summary.records}/${this.totalFeatureCount}`,
+            `invalid=${summary.invalid}`,
+            `skipped=${summary.skipped}`,
+            `lastCompletedOid=${this.resumeAfterOid ?? 'n/a'}`,
+            `resumeState=${this.resumeStatePath ?? 'n/a'}`,
+          ].join(', ');
+          throw new Error(`Export stopped short without a terminal fetch error: ${detail}. Rerun with DEBUG_ESRI_QUERY=1 for raw request diagnostics.`);
+        }
+        if (this.resumeState && !this._stopRequested) {
+          this.resumeState = this.buildResumeState(this.resumeState.oidField, {
+            ...this.resumeState,
+            ...this.getWriterResumeStatePatch(),
+            oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
+            lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
+            lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
+            completed: true,
+            recordsWritten: this.resumeState.recordsWritten,
+            lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
+          });
+          await this.saveResumeState();
+        }
+      } catch (err) {
+        if (this.resumeState) {
+          this.resumeState = this.buildResumeState(this.resumeState.oidField, {
+            ...this.resumeState,
+            ...this.getWriterResumeStatePatch(),
+            oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
+            lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
+            lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
+            completed: false,
+            lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
+          });
+          await this.saveResumeState();
+        }
+        throw err;
       } finally {
-        // Drain in-flight writes whether startQuery succeeded or failed, so the
-        // checkpoint always reflects what is actually on disk before we close.
-        await this._lastWrite.catch(() => {});
+        await this.writer.close();
       }
-      if (this._writeError) throw this._writeError;
-      const summary = this.writer.getSummary();
-      const dedupeEnabled = Boolean((this.options as any).dedupe);
-      const onInvalid = (this.options as any)['on-invalid'] ?? (this.options as any).onInvalid;
-      const shortfall = Math.max(0, Number(this.totalFeatureCount || 0) - Number(summary.records || 0));
-      if (!this._stopRequested && this.totalFeatureCount > 0 && shortfall > 0 && this.runtimeParams.featureCount > 0 && !dedupeEnabled && onInvalid !== 'skip') {
-        const detail = [
-          `records=${summary.records}/${this.totalFeatureCount}`,
-          `invalid=${summary.invalid}`,
-          `skipped=${summary.skipped}`,
-          `lastCompletedOid=${this.resumeAfterOid ?? 'n/a'}`,
-          `resumeState=${this.resumeStatePath ?? 'n/a'}`,
-        ].join(', ');
-        throw new Error(`Export stopped short without a terminal fetch error: ${detail}. Rerun with DEBUG_ESRI_QUERY=1 for raw request diagnostics.`);
-      }
-      if (this.resumeState && !this._stopRequested) {
-        this.resumeState = this.buildResumeState(this.resumeState.oidField, {
-          ...this.resumeState,
-          ...this.getWriterResumeStatePatch(),
-          oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
-          lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
-          lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
-          completed: true,
-          recordsWritten: this.resumeState.recordsWritten,
-          lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
-        });
-        await this.saveResumeState();
-      }
-    } catch (err) {
-      if (this.resumeState) {
-        this.resumeState = this.buildResumeState(this.resumeState.oidField, {
-          ...this.resumeState,
-          ...this.getWriterResumeStatePatch(),
-          oidMode: this.adaptiveOidMetrics?.oidMode ?? this.resumeState.oidMode,
-          lastWindowSize: this.adaptiveOidMetrics?.lastWindowSize ?? this.resumeState.lastWindowSize,
-          lastChunkSize: this.adaptiveOidMetrics?.lastChunkSize ?? this.resumeState.lastChunkSize,
-          completed: false,
-          lastCompletedOid: this.resumeAfterOid ?? this.resumeState.lastCompletedOid,
-        });
-        await this.saveResumeState();
-      }
-      throw err;
     } finally {
-      await this.writer.close();
+      await this.releaseResumeLock();
     }
 
     // Update runtime parameters to indicate the process is complete
@@ -1051,10 +1388,66 @@ export default class EsriQuery {
       fetchLog: (this.options as any)['fetch-log'] ?? (this.options as any).fetchLog,
     });
 
+    let latestMetrics: Record<string, any> = {};
+    let heartbeatTimer: NodeJS.Timeout | undefined;
+    let lastStallWarningAt = 0;
+    const queryStartedAt = Date.now();
+    const heartbeatSeconds = this.getPositiveSeconds('heartbeat-seconds', 'heartbeatSeconds', 30);
+    const heartbeatMs = heartbeatSeconds > 0 ? Math.max(1000, heartbeatSeconds * 1000) : 0;
+    const stallMs = this.getPositiveSeconds('stall-seconds', 'stallSeconds', 180) * 1000;
+    const startHeartbeat = () => {
+      if (!this.options.progress || heartbeatTimer || heartbeatMs <= 0) return;
+      const emitStatus = () => {
+        const now = Date.now();
+        const records = Number((this.writer as any)?.status?.records ?? this.runtimeParams.featureCount ?? 0);
+        const total = Number(this.totalFeatureCount || 0);
+        const inFlight = Number(latestMetrics.inFlightRequests ?? 0);
+        const totalRequests = Number(latestMetrics.totalRequests ?? 0);
+        const retries = Number(latestMetrics.totalRetries ?? 0);
+        const backoffMs = Number(latestMetrics.totalBackoffMs ?? 0);
+        const lastRequestAt = Number(latestMetrics.lastRequestStartedAt || 0);
+        const lastSuccessAt = Number(latestMetrics.lastSuccessAt || 0);
+        const lastFailureAt = Number(latestMetrics.lastFailureAt || 0);
+        const pct = total > 0 ? ` (${Math.floor((records / total) * 100)}%)` : '';
+        const parts = [
+          `[heartbeat] records=${records}${total ? `/${total}` : ''}${pct}`,
+          `inflight=${Number.isFinite(inFlight) ? inFlight : 0}`,
+          `requests=${Number.isFinite(totalRequests) ? totalRequests : 0}`,
+          `retries=${Number.isFinite(retries) ? retries : 0}`,
+          Number.isFinite(backoffMs) && backoffMs > 0 ? `backoff=${this.formatElapsed(backoffMs)}` : '',
+          lastRequestAt ? `lastRequest=${this.formatElapsed(now - lastRequestAt)} ago` : 'lastRequest=never',
+          lastSuccessAt ? `lastFetch=${this.formatElapsed(now - lastSuccessAt)} ago` : 'lastFetch=never',
+          this.lastWriteAt ? `lastWrite=${this.formatElapsed(now - this.lastWriteAt)} ago` : 'lastWrite=never',
+          latestMetrics.oidMode ? `mode=${latestMetrics.oidMode}` : '',
+          latestMetrics.currentWindowSize != null ? `window=${latestMetrics.currentWindowSize}` : '',
+          latestMetrics.currentChunkSize != null ? `chunk=${latestMetrics.currentChunkSize}` : '',
+          `checkpointOid=${this.resumeAfterOid ?? this.resumeState?.lastCompletedOid ?? 'n/a'}`,
+        ].filter(Boolean);
+        process.stderr.write(parts.join(' ') + '\n');
+
+        const lastUsefulActivityAt = Math.max(lastSuccessAt, this.lastWriteAt, queryStartedAt);
+        if (stallMs > 0 && now - lastUsefulActivityAt >= stallMs && now - lastStallWarningAt >= stallMs) {
+          lastStallWarningAt = now;
+          const failureAge = lastFailureAt ? ` lastFailure=${this.formatElapsed(now - lastFailureAt)} ago` : '';
+          const code = latestMetrics.lastCode ? ` code=${latestMetrics.lastCode}` : '';
+          const status = latestMetrics.lastStatus ? ` status=${latestMetrics.lastStatus}` : '';
+          const message = latestMetrics.lastErrorMessage ? ` message=${String(latestMetrics.lastErrorMessage)}` : '';
+          process.stderr.write(
+            `[stall] no successful fetch/write for ${this.formatElapsed(now - lastUsefulActivityAt)}; ` +
+            `inflight=${Number.isFinite(inFlight) ? inFlight : 0} requests=${Number.isFinite(totalRequests) ? totalRequests : 0}` +
+            ` retries=${Number.isFinite(retries) ? retries : 0}${failureAge}${code}${status}${message}\n`
+          );
+        }
+      };
+      heartbeatTimer = setInterval(emitStatus, heartbeatMs);
+      (heartbeatTimer as any).unref?.();
+    };
+
     let lastRetriesPrinted = 0;
     const wire = (tool: any) => {
       try {
         tool.on('metrics', (m: any) => {
+          latestMetrics = { ...latestMetrics, ...(m ?? {}) };
           this.applyAdaptiveOidMetrics(m);
           if (!this.options.progress) return;
           try {
@@ -1098,10 +1491,12 @@ export default class EsriQuery {
         // only after the batch is durably written.
         this._lastWrite = this._lastWrite.then(async () => {
           const accepted = await this.writeBatchFromArcgis(batch as any);
+          this.lastWriteAt = Date.now();
           if (batchMaxOid != null) {
             await this.writer.save();
             this.resumeAfterOid = batchMaxOid;
             await this.recordResumeProgress(batchMaxOid, accepted ?? 0);
+            this.lastWriteAt = Date.now();
           }
         }).catch((err: any) => {
           this._writeError = err instanceof Error ? err : new Error(String(err));
@@ -1121,13 +1516,19 @@ export default class EsriQuery {
       const oids = new OidChunkQueryTool(makeOptions() as any);
       this._activeTool = oids;
       wire(oids);
+      startHeartbeat();
       try {
         await oids.runQuery();
       } catch (err) {
         if (this._writeError) throw this._writeError;
         if (this._stopRequested && this._stopReason === 'max-records') return;
+        if (this._stopRequested && this._stopReason === 'signal') return;
         throw err;
       } finally {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = undefined;
+        }
         this._activeTool = null;
       }
       return;

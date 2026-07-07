@@ -18,6 +18,8 @@ export type CliBaseOptionsType = {
   'feature-count': number,
   json: boolean,
   progress: boolean,
+  'heartbeat-seconds'?: number,
+  'stall-seconds'?: number,
   'fetch-log'?: string,
   'no-bbox': boolean,
   'dry-run': boolean,
@@ -222,76 +224,99 @@ export async function main(argv = process.argv.slice(2)) {
   let totalFeatures = 0;
   const started = Date.now();
   let hadErrors = false;
+  let activeQuery: EsriQuery | undefined;
+  let receivedSignal: NodeJS.Signals | undefined;
+  const onSignal = (signal: NodeJS.Signals) => {
+    receivedSignal = signal;
+    hadErrors = true;
+    if (activeQuery) {
+      activeQuery.requestGracefulStop(signal);
+      return;
+    }
+    process.exitCode = 130;
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
 
-  for (let idx = 0; idx < jobs.length; idx++) {
-    const job: ExtractJob = jobs[idx] as ExtractJob;
-    const merged: CliOptionsType = {
-      ...(job as Record<string, unknown>),
-      ...(options as Record<string, unknown>)
-    } as CliOptionsType;
-    delete (merged as any).config;
-    merged.where = (merged.where ?? '1=1')?.trim() || '1=1';
-    const label = (merged as any).output ?? (merged as any).url ?? (merged as any)['layer-name'] ?? (merged as any).where ?? `job-${idx + 1}`;
-    if ((options as any).progress) {
-      process.stderr.write(`\n[${idx + 1}/${jobs.length}] Starting: ${(job as ExtractJob).name ?? String(label)}\n`);
-    }
-    // DEBUG removed
-    validateJobKeys(merged as Record<string, unknown>, new Set(optionDefinitions.map(o => String(o.name))), String(label));
-    // Normalize bbox if provided via CLI string
-    if ((merged as any).bbox && typeof (merged as any).bbox === 'string') {
-      const parsed = normalizeBbox((merged as any).bbox);
-      if (parsed) (merged as any).bbox = parsed;
-    }
-    // DEBUG removed
-    const validatedMerged = validateJob(normalizeHeadersOption(merged as Record<string, unknown>, String(label)), String(label));
-    // Early validations
-    const fmt = (validatedMerged as any).format;
-    const out = (validatedMerged as any).output;
-    if ((fmt === 'geoparquet' || fmt === 'gpkg' || fmt === 'flatgeobuf') && !out) {
-      throw new Error(`${label}: --output is required for format '${fmt}'.`);
-    }
-    if ((validatedMerged as any).partition && fmt !== 'geojsonseq') {
-      throw new Error(`${label}: --partition requires --format geojsonseq (NDJSON).`);
-    }
-    if ((validatedMerged as any)['max-file-bytes'] && fmt !== 'geojsonseq') {
-      throw new Error(`${label}: --max-file-bytes requires --format geojsonseq (NDJSON).`);
-    }
-    if (validatedMerged.format === 'flatgeobuf' && typeof validatedMerged.output === 'string' && !validatedMerged.output.endsWith('.fgb')) {
-      process.stderr.write(`[warn] ${label}: output extension should be ".fgb" for flatgeobuf format (got "${validatedMerged.output}")\n`);
-    }
-    if (validatedMerged.format === 'geoparquet' && typeof validatedMerged.output === 'string' &&
-        !(validatedMerged.output.endsWith('.parquet') || validatedMerged.output.endsWith('.gpq'))) {
-      process.stderr.write(`[warn] ${label}: output extension should be ".parquet" or ".gpq" for geoparquet format (got "${validatedMerged.output}")\n`);
-    }
-    let Query: EsriQuery | undefined;
-    try {
-      Query = new EsriQuery(validatedMerged as EsriQueryOptions);
-      const result = await Query.start() as any;
-      totalFeatures += (result?.featureCount ?? 0);
+  try {
+    for (let idx = 0; idx < jobs.length; idx++) {
+      if (receivedSignal) break;
+      const job: ExtractJob = jobs[idx] as ExtractJob;
+      const merged: CliOptionsType = {
+        ...(job as Record<string, unknown>),
+        ...(options as Record<string, unknown>)
+      } as CliOptionsType;
+      delete (merged as any).config;
+      merged.where = (merged.where ?? '1=1')?.trim() || '1=1';
+      const label = (merged as any).output ?? (merged as any).url ?? (merged as any)['layer-name'] ?? (merged as any).where ?? `job-${idx + 1}`;
       if ((options as any).progress) {
-        process.stderr.write(
-          `[${idx + 1}/${jobs.length}] Completed: ${result?.featureCount ?? 0} features in ${result?.runTime ?? '?'} seconds\n`
-        );
+        process.stderr.write(`\n[${idx + 1}/${jobs.length}] Starting: ${(job as ExtractJob).name ?? String(label)}\n`);
       }
-    } catch (error) {
-      hadErrors = true;
-      process.stderr.write(`[${idx + 1}/${jobs.length}] Error: ${(error as Error).message}\n`);
-      const snapshot = Query?.getProgressSnapshot?.();
-      const committedThisRun = Number(snapshot?.featureCount ?? 0);
-      if (committedThisRun > 0) {
-        totalFeatures += committedThisRun;
+      // DEBUG removed
+      validateJobKeys(merged as Record<string, unknown>, new Set(optionDefinitions.map(o => String(o.name))), String(label));
+      // Normalize bbox if provided via CLI string
+      if ((merged as any).bbox && typeof (merged as any).bbox === 'string') {
+        const parsed = normalizeBbox((merged as any).bbox);
+        if (parsed) (merged as any).bbox = parsed;
       }
-      if (snapshot?.lastCompletedOid != null) {
-        const cumulative = Number(snapshot?.checkpointRecordsWritten ?? committedThisRun);
-        const statePath = snapshot?.resumeStatePath ?? '(unknown state file)';
-        process.stderr.write(
-          `[${idx + 1}/${jobs.length}] Resume checkpoint: last completed OID ${snapshot.lastCompletedOid}; committed this run ${committedThisRun}; checkpoint total ${cumulative}; state ${statePath}\n`
-        );
-      } else if (committedThisRun > 0) {
-        process.stderr.write(`[${idx + 1}/${jobs.length}] Partial progress: committed ${committedThisRun} feature(s) before failure\n`);
+      // DEBUG removed
+      const validatedMerged = validateJob(normalizeHeadersOption(merged as Record<string, unknown>, String(label)), String(label));
+      // Early validations
+      const fmt = (validatedMerged as any).format;
+      const out = (validatedMerged as any).output;
+      if ((fmt === 'geoparquet' || fmt === 'gpkg' || fmt === 'flatgeobuf') && !out) {
+        throw new Error(`${label}: --output is required for format '${fmt}'.`);
       }
-      process.exitCode = 1;
+      if ((validatedMerged as any).partition && fmt !== 'geojsonseq') {
+        throw new Error(`${label}: --partition requires --format geojsonseq (NDJSON).`);
+      }
+      if ((validatedMerged as any)['max-file-bytes'] && fmt !== 'geojsonseq') {
+        throw new Error(`${label}: --max-file-bytes requires --format geojsonseq (NDJSON).`);
+      }
+      if (validatedMerged.format === 'flatgeobuf' && typeof validatedMerged.output === 'string' && !validatedMerged.output.endsWith('.fgb')) {
+        process.stderr.write(`[warn] ${label}: output extension should be ".fgb" for flatgeobuf format (got "${validatedMerged.output}")\n`);
+      }
+      if (validatedMerged.format === 'geoparquet' && typeof validatedMerged.output === 'string' &&
+          !(validatedMerged.output.endsWith('.parquet') || validatedMerged.output.endsWith('.gpq'))) {
+        process.stderr.write(`[warn] ${label}: output extension should be ".parquet" or ".gpq" for geoparquet format (got "${validatedMerged.output}")\n`);
+      }
+      let Query: EsriQuery | undefined;
+      try {
+        Query = new EsriQuery(validatedMerged as EsriQueryOptions);
+        activeQuery = Query;
+        const result = await Query.start() as any;
+        activeQuery = undefined;
+        totalFeatures += (result?.featureCount ?? 0);
+        if ((options as any).progress) {
+          process.stderr.write(
+            `[${idx + 1}/${jobs.length}] Completed: ${result?.featureCount ?? 0} features in ${result?.runTime ?? '?'} seconds\n`
+          );
+        }
+      } catch (error) {
+        activeQuery = undefined;
+        hadErrors = true;
+        process.stderr.write(`[${idx + 1}/${jobs.length}] Error: ${(error as Error).message}\n`);
+        const snapshot = Query?.getProgressSnapshot?.();
+        const committedThisRun = Number(snapshot?.featureCount ?? 0);
+        if (committedThisRun > 0) {
+          totalFeatures += committedThisRun;
+        }
+        if (snapshot?.lastCompletedOid != null) {
+          const cumulative = Number(snapshot?.checkpointRecordsWritten ?? committedThisRun);
+          const statePath = snapshot?.resumeStatePath ?? '(unknown state file)';
+          process.stderr.write(
+            `[${idx + 1}/${jobs.length}] Resume checkpoint: last completed OID ${snapshot.lastCompletedOid}; committed this run ${committedThisRun}; checkpoint total ${cumulative}; state ${statePath}\n`
+          );
+        } else if (committedThisRun > 0) {
+          process.stderr.write(`[${idx + 1}/${jobs.length}] Partial progress: committed ${committedThisRun} feature(s) before failure\n`);
+        }
+        process.exitCode = receivedSignal ? 130 : 1;
+      }
     }
+  } finally {
+    activeQuery = undefined;
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
 
   if ((options as any).progress) {

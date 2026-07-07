@@ -6,6 +6,12 @@ function coerceOptionalPositiveInt(value: unknown): unknown {
   return Number.isFinite(coerced) ? coerced : value;
 }
 
+function coerceOptionalNonNegativeInt(value: unknown): unknown {
+  if (value === '' || value == null) return undefined;
+  const coerced = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(coerced) ? coerced : value;
+}
+
 function coerceOptionalBoolean(value: unknown): unknown {
   if (value === '' || value == null) return undefined;
   if (typeof value === 'boolean') return value;
@@ -43,9 +49,14 @@ export const optionDefinitions: OptionDef[] = [
   { name: 'oid-window', type: Number, description: 'OID range scan initial window size (default 1000)', group: 'base' },
   { name: 'format', alias: 't', type: String, description: 'Output format (geojson, esrijson, geojsonseq, gpkg, flatgeobuf, geoparquet)', group: 'base' },
   { name: 'progress', alias: 'p', type: Boolean, description: 'Show progress', group: 'base' },
+  { name: 'heartbeat-seconds', type: Number, description: 'Progress heartbeat interval for long runs (default 30; 0 disables)', group: 'base' },
+  { name: 'stall-seconds', type: Number, description: 'Warn after this many seconds without a successful fetch/write (default 180; 0 disables)', group: 'base' },
   { name: 'fetch-log', type: String, description: 'Write one JSON record per HTTP attempt to this file', group: 'base' },
   { name: 'max-file-bytes', type: Number, description: 'GeoJSONSeq: roll output into .partNNNN files after this many bytes', group: 'base' },
-  { name: 'resume-state', type: String, description: 'Path to a JSON checkpoint file for resumable geojsonseq exports', group: 'base' },
+  { name: 'resume-state', type: String, description: 'Path to a JSON checkpoint file for resumable geojsonseq and gpkg exports', group: 'base' },
+  { name: 'wait-for-server', type: Boolean, description: 'Ride out server outages: checkpoint, wait with backoff, and resume automatically (requires --resume-state)', group: 'base' },
+  { name: 'wait-max-seconds', type: Number, description: 'Give up waiting after this many cumulative seconds without forward progress (default: wait forever)', group: 'base' },
+  { name: 'wait-max-attempts', type: Number, description: 'Give up after this many consecutive resume attempts that make no progress against a responsive server (default 20)', group: 'base' },
   { name: 'parquetScanRows', alias: 'S', type: Number, description: 'GeoParquet: lookahead rows for schema inference (default 1000)', group: 'base' },
   { name: 'no-bbox', type: Boolean, description: 'Disable per-feature bbox and file-level bbox output', group: 'geometry' },
   { name: 'geometry-column-name', type: String, description: 'GeoParquet: geometry column name (default "geometry")', group: 'geometry' },
@@ -83,9 +94,14 @@ export const jobSchema = z.object({
   output: z.string().optional(),
   format: z.enum(['geojson', 'esrijson', 'geojsonseq', 'gpkg', 'flatgeobuf', 'geoparquet']).optional(),
   progress: z.boolean().optional(),
+  'heartbeat-seconds': z.preprocess(coerceOptionalNonNegativeInt, z.number().int().nonnegative().optional()),
+  'stall-seconds': z.preprocess(coerceOptionalNonNegativeInt, z.number().int().nonnegative().optional()),
   'fetch-log': z.string().optional(),
   'max-file-bytes': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'resume-state': z.string().optional(),
+  'wait-for-server': z.preprocess(coerceOptionalBoolean, z.boolean().optional()),
+  'wait-max-seconds': z.preprocess(coerceOptionalNonNegativeInt, z.number().int().nonnegative().optional()),
+  'wait-max-attempts': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'max-records': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
   'on-invalid': z.enum(['throw', 'keep', 'skip']).optional(),
   'progress-every': z.preprocess(coerceOptionalPositiveInt, z.number().int().positive().optional()),
@@ -131,9 +147,14 @@ export type CliBaseOptionsType = {
   output?: string;
   format?: 'geojson' | 'esrijson' | 'geojsonseq' | 'gpkg' | 'flatgeobuf' | 'geoparquet';
   progress?: boolean;
+  'heartbeat-seconds'?: number;
+  'stall-seconds'?: number;
   'fetch-log'?: string;
   'max-file-bytes'?: number;
   'resume-state'?: string;
+  'wait-for-server'?: boolean;
+  'wait-max-seconds'?: number;
+  'wait-max-attempts'?: number;
   'max-records'?: number;
   'on-invalid'?: 'throw' | 'keep' | 'skip';
   'progress-every'?: number;
